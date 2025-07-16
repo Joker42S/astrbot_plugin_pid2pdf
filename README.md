@@ -1,9 +1,1 @@
-# helloworld
-
-AstrBot 插件模板
-
-A template plugin for AstrBot plugin feature
-
-# 支持
-
-[帮助文档](https://astrbot.app)
+# 一个AstrBot插件 输入PID下载图片并合并为PDF发送
