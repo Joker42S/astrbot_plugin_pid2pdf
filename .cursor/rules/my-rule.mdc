@@ -11,8 +11,6 @@ alwaysApply: false
 
 使用库:{pixivpy}
 
-参考项目:{@https://github.com/vmoranv/astrbot_plugin_pixiv_search}
-
 平台API参考文档:{
 @https://docs.astrbot.app/dev/star/plugin.html,
 @https://docs.astrbot.app/dev/star/all_resources.html,

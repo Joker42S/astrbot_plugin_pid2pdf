@@ -1,5 +1,5 @@
 name: pid2pdf # 插件的唯一识别名
 desc: 一个根据Pixiv ID下载图片并保存为PDF的AstrBot插件 # 插件简短描述
-version: v1.0.0 # 插件版本号
-author: YourName # 作者
-repo: https://github.com/yourusername/astrbot_plugin_pid2pdf # 插件的仓库地址
+version: v1.0.1 # 插件版本号
+author: Max # 作者
+repo: https://github.com/Joker42S/astrbot_plugin_pid2pdf # 插件的仓库地址

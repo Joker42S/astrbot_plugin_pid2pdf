@@ -1,0 +1,47 @@
+{
+  "refresh_token": {
+      "description": "Pixiv Refresh Token",
+      "type": "string",
+      "hint": "用于 API 认证，安全性更高。获取方法请参考 pixiv-api 文档或网络教程。",
+      "default": "",
+      "is_sensitive": true,
+      "required": true
+  },
+  "proxy": {
+    "description": "代理地址",
+    "type": "string",
+    "hint": "代理地址",
+    "default": "",
+    "is_sensitive": true
+  },
+  "r18_mode": {
+      "description": "R18 内容过滤模式",
+      "type": "string",
+      "hint": "选择如何处理 R18 内容：'过滤 R18' (默认), '允许 R18', '仅 R18'",
+      "default": "过滤 R18",
+      "options": [
+          "过滤 R18",
+          "允许 R18",
+          "仅 R18"
+      ]
+  },
+  "ai_filter_mode": {
+      "description": "AI 生成作品过滤模式",
+      "type": "string",
+      "hint": "选择如何处理 AI 生成的作品：'显示 AI 作品' (默认), '过滤 AI 作品', '仅 AI 作品'",
+      "default": "显示 AI 作品",
+      "options": [
+          "显示 AI 作品",
+          "过滤 AI 作品",
+          "仅 AI 作品"
+      ]
+  },
+  "refresh_token_interval_minutes": {
+      "description": "自动刷新 Refresh Token 的间隔时间（分钟）",
+      "type": "int",
+      "hint": "为防止 Refresh Token 因长期未使用而失效，插件会定期尝试使用它进行认证。单位为分钟，设置为 0 或负数则禁用自动刷新。",
+      "default": 180,
+      "min": 0,
+      "max": 10080
+  }
+}

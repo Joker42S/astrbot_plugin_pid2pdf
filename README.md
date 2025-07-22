@@ -2,37 +2,33 @@
 
 一个用于AstrBot的插件，可以根据Pixiv ID下载图片并合并为PDF文件发送给用户。
 
-## 📋 功能特性
+## ✅ 已实现功能
+- [x] 配置refresh_token 登录 Pixiv API
+- [x] `/pid2pdf <PID>` 下载图片并打包为PDF文件发送
+- [x] 保留pdf，清理其他临时文件
 
-### ✅ 已实现功能
-- [x] 监听指令 `/pid2pdf <PID>` - 根据Pixiv ID下载图片并生成PDF
-- [x] 使用refresh_token登录Pixiv API
-- [x] 下载图片到本地临时目录
-- [x] 将图片打包为PDF文件
-- [x] 本地临时存储（图片，PDF）
-- [x] 自动清理临时文件
-- [x] 帮助指令 `/pid_help` - 显示使用说明
-
-### 🚧 计划功能
-- [ ] 配置页面（token，代理，频率限制，追加功能）
+## 🚧 计划功能
+- [ ] 配置代理
 - [ ] 图片直传模式
-- [ ] R18 tag 筛选
-- [ ] 按作者下载
-- [ ] 排行榜下载
+- [ ] 下载指定作者作品
+- [ ] 下载排行榜作品
+- [ ] 丰富回复信息
+- [ ] 搜索功能
+- [ ] 监听Pixiv或其他镜像站的链接分享
+- [ ] 指定 tag 过滤
+- [ ] 订阅功能
 
-## 🚀 快速开始
-
-### 环境要求
-- Python 3.7+
-- AstrBot 框架
+## 📦 环境要求
+- 安装AstrBot
 - 有效的Pixiv账号
+- Pixiv refresh_token，获取方法可参考：[Pixiv OAuth Flow](https://gist.github.com/ZipFile/c9ebedb224406f4f11845ab700124362) （如果无法直连pixiv，需要配置全局TUN代理）
 
-### 安装步骤
+## 🛠️ 安装步骤
 
 1. **克隆插件到AstrBot插件目录**
 ```bash
 cd /path/to/astrbot/plugins
-git clone https://github.com/yourusername/astrbot_plugin_pid2pdf.git
+git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 ```
 
 2. **安装依赖包**
@@ -41,7 +37,7 @@ cd astrbot_plugin_pid2pdf
 pip install -r requirements.txt
 ```
 
-3. **配置Pixiv账号**
+3. **配置参数**
    - 获取Pixiv refresh_token
    - 在插件配置中设置token信息
 
@@ -64,129 +60,50 @@ pip install -r requirements.txt
 
 ### 使用示例
 
-1. **下载单图作品**
+1. **输入pid下载**
 ```
 用户: /pid2pdf 987654321
-机器人: 开始处理Pixiv ID: 987654321，请稍候...
-机器人: PDF生成完成: pixiv_987654321.pdf
+机器人: 开始获取 Pixiv 作品: 987654321，请稍候...
+机器人: pixiv_987654321.pdf
 ```
 
-2. **下载多图作品**
+2. **已下载过的pid**
 ```
-用户: /pid2pdf 123456789
-机器人: 开始处理Pixiv ID: 123456789，请稍候...
-机器人: 下载了 5 张图片
-机器人: PDF生成完成: pixiv_123456789.pdf
+用户: /pid2pdf 987654321
+机器人: pixiv_987654321.pdf
 ```
 
 ## ⚙️ 配置说明
 
-### Pixiv API配置
+施工中
 
-插件需要配置Pixiv API的认证信息：
+## 📂 文件结构
 
-```python
-# 在main.py中配置
-self.api.auth(refresh_token="your_refresh_token")
-```
+### 核心文件
 
-### 代理设置（可选）
+- `main.py` - 插件入口点和命令注册
+- `_conf_schema.json` - 配置模式定义（用于 AstrBot 管理面板显示）
+- `requirements.txt` - 依赖库列表
 
-如果需要使用代理访问Pixiv：
+### 数据目录
 
-```python
-# 配置代理
-self.api.set_proxy("http://127.0.0.1:7890")
-```
+位于 `AstrBot/data/plugin_data/pid2pdf/`:
 
-## 📦 依赖包
-
-- `pixivpy3>=3.7.0` - Pixiv API客户端
-- `Pillow>=9.0.0` - 图片处理
-- `reportlab>=3.6.0` - PDF生成
-- `requests>=2.28.0` - HTTP请求
-- `aiohttp>=3.8.0` - 异步支持
-
-## 🔧 开发说明
-
-### 项目结构
-```
-astrbot_plugin_pid2pdf/
-├── main.py              # 主插件文件
-├── requirements.txt      # 依赖包列表
-├── metadata.yaml        # 插件元数据
-├── README.md           # 项目说明
-└── LICENSE             # 开源协议
-```
-
-### 核心功能模块
-
-1. **Pixiv API集成** - 使用pixivpy3库访问Pixiv API
-2. **图片下载** - 支持单图和多图作品下载
-3. **PDF生成** - 使用reportlab将图片合并为PDF
-4. **文件管理** - 临时文件创建和清理
-5. **错误处理** - 完善的异常处理机制
-
-### 扩展开发
-
-如需添加新功能，可以参考以下结构：
-
-```python
-@filter.command("new_feature")
-async def new_feature(self, event: AstrMessageEvent):
-    """新功能实现"""
-    # 实现逻辑
-    pass
-```
-
-## 🐛 故障排除
-
-### 常见问题
-
-1. **Pixiv API认证失败**
-   - 检查refresh_token是否正确
-   - 确认账号状态正常
-
-2. **图片下载失败**
-   - 检查网络连接
-   - 确认PID是否存在
-   - 检查代理设置
-
-3. **PDF生成失败**
-   - 确认Pillow和reportlab已正确安装
-   - 检查磁盘空间是否充足
-
-### 日志查看
-
-插件运行日志会输出到AstrBot的日志系统中，可通过以下方式查看：
-
-```bash
-# 查看AstrBot日志
-tail -f /path/to/astrbot/logs/astrbot.log
-```
+- `temp/` - 下载的临时图片目录
+- `persistent/` - 生成的 PDF 文件目录
 
 ## 📄 许可证
 
-本项目采用 [LICENSE](LICENSE) 许可证。
+本项目遵循开源许可证，具体许可证信息请查看项目根目录下的 LICENSE 文件。
 
-## 🤝 贡献
+## 🙏 特别感谢
 
-欢迎提交Issue和Pull Request来改进这个插件！
+本项目基于或参考了以下开源项目:
 
-### 贡献指南
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-## 📞 联系方式
-
-- 作者: Joker42S
-- 项目地址: https://github.com/yourusername/astrbot_plugin_pid2pdf
-- 问题反馈: https://github.com/yourusername/astrbot_plugin_pid2pdf/issues
-
+- [AstrBot](https://github.com/Soulter/AstrBot) - AstrBot平台
+- [pixivpy3](https://github.com/upbit/pixivpy) - Pixiv API
+- [JM-Cosmos](https://github.com/GEMILUXVII/astrbot_plugin_jm_cosmos) - AstrBot插件，下载JM漫画并转PDF发送
+- [PixivSearch](https://github.com/vmoranv/astrbot_plugin_pixiv_search) - AstrBot Pixiv 搜索插件
 ---
 
 **注意**: 使用本插件时请遵守Pixiv的服务条款和版权规定。仅用于个人学习和合法用途。
