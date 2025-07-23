@@ -117,6 +117,50 @@ class Pid2PdfPlugin(Star):
             logger.error(f"处理PID转PDF时出错: {e}")
             yield event.plain_result(f"处理过程中出现错误: {str(e)}")
 
+    @filter.command("pid")
+    async def pid(self, event: AstrMessageEvent):
+        """根据Pixiv ID下载图片并发送"""
+        try:
+            # 解析用户输入的PID
+            message_parts = event.message_str.strip().split()
+            if len(message_parts) < 2:
+                yield event.plain_result("请提供Pixiv ID，格式: /pid2pdf <PID>")
+                return
+            
+            pid = message_parts[1].strip()
+            if not pid.isdigit():
+                yield event.plain_result("Pixiv ID必须是数字")
+                return
+            #检查本地是否存在PID的PDF文件
+            img_path = self.temp_dir / f"{pid}"
+            if img_path.exists():
+                logger.info(f"本地已存在该PID的图片: {img_path}")
+                # 发送PDF文件
+                async for result in self._send_img(event, img_path, pid):
+                    yield result
+                return
+            
+            yield event.plain_result(f"开始获取 Pixiv 作品: {pid}，请稍候...")
+            
+            # 获取作品详情
+            artwork_info = await self._get_artwork_info(pid)
+            if not artwork_info:
+                yield event.plain_result(f"无法获取PID {pid} 的作品信息")
+                return
+            
+            # 下载图片
+            image_paths = await self._download_images(artwork_info, pid)
+            if not image_paths:
+                yield event.plain_result(f"下载PID {pid} 的图片失败")
+                return
+            
+            # 发送图片
+            async for result in self._send_img(event, img_path, pid):
+                yield result
+            
+        except Exception as e:
+            logger.error(f"处理PID出错: {e}")
+            yield event.plain_result(f"处理过程中出现错误: {str(e)}")
 
     async def _get_artwork_info(self, pid: str) -> dict:
         """获取Pixiv作品信息"""
@@ -178,7 +222,12 @@ class Pid2PdfPlugin(Star):
             logger.error(f"下载图片失败: {e}")
             return []
 
-    async def _download_single_image(self, url: str, index: int, pid) -> Path:
+    async def _download_single_image(self, url: str, index: int, pid, modify_hash = True) -> Path:
+        for file_extension in ['jpg', 'png', 'gif']:
+            file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
+            if file_path.exists():
+                ## 图片已存在，无需重复下载
+                return file_path
         """下载单张图片"""
         try:
             # 设置请求头
@@ -205,8 +254,12 @@ class Pid2PdfPlugin(Star):
                         file_extension = 'jpg'  # 默认使用jpg
                 
                 file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
+
+                img_data = response.content
+                if modify_hash:
+                    await _image_obfus(img_data)
                 with open(file_path, 'wb') as f:
-                    f.write(response.content)
+                    f.write(img_data)
                 
                 logger.info(f"下载图片 {index}: {file_path}")
                 return file_path
@@ -248,12 +301,40 @@ class Pid2PdfPlugin(Star):
             logger.error(f"发送PDF失败: {e}")
             yield event.plain_result(f"发送PDF文件失败: {str(e)}")
 
+    async def _send_img(self, event: AstrMessageEvent, img_path: Path, pid: str, fake_record = False):
+        """发送PDF文件给用户"""
+        try:
+            if img_path.exists():
+                chain = [Plain(f'PID：{pid}')]
+                for img in img_path.iterdir():
+                    if not img.is_file():
+                        continue
+                    chain.append(Image.fromFileSystem(str(img.absolute())))
+                if fake_record:
+                    node = Node(
+                            uin=905617992,
+                            name="Soulter",
+                            content=chain
+                        )
+                    yield event.chain_result([node])
+                else:
+                    yield event.chain_result(chain)
+                logger.info(f"图片已送: {pid}")
+                yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
+            else:
+                yield event.plain_result("图片发送失败")
+            
+        except Exception as e:
+            logger.error(f"发送图片失败: {e}")
+            yield event.plain_result(f"发送图片失败: {str(e)}")
+
+
     async def _cleanup_temp_files(self):
         """清理临时文件"""
         try:
             if self.temp_dir and self.temp_dir.exists():
                 import shutil
-                shutil.rmtree(self.temp_dir)
+                # shutil.rmtree(self.temp_dir)
                 logger.info("清理临时文件完成")
         except Exception as e:
             logger.error(f"清理临时文件失败: {e}")
@@ -293,3 +374,49 @@ Pixiv API状态: {'已登录' if self.papi and self.refresh_token else '未配�
         """插件销毁方法"""
         await self._cleanup_temp_files()
         logger.info("Pid2Pdf插件已销毁")
+
+async def _image_obfus(img_data):
+    """破坏图片哈希"""
+    from PIL import Image as ImageP
+    from io import BytesIO
+    import random
+
+    try:
+        with BytesIO(img_data) as input_buffer:
+            with ImageP.open(input_buffer) as img:
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                width, height = img.size
+                pixels = img.load()
+
+                points = []
+                for _ in range(3):
+                    while True:
+                        x = random.randint(0, width - 1)
+                        y = random.randint(0, height - 1)
+                        if (x, y) not in points:
+                            points.append((x, y))
+                            break
+
+                for x, y in points:
+                    r, g, b = pixels[x, y]
+
+                    r_change = random.choice([-1, 1])
+                    g_change = random.choice([-1, 1])
+                    b_change = random.choice([-1, 1])
+
+                    new_r = max(0, min(255, r + r_change))
+                    new_g = max(0, min(255, g + g_change))
+                    new_b = max(0, min(255, b + b_change))
+
+                    pixels[x, y] = (new_r, new_g, new_b)
+
+                with BytesIO() as output:
+                    img.save(output, format="PNG")
+                    return output.getvalue()
+
+    except Exception as e:
+        logger.warning(f"破坏图片哈希时发生错误: {str(e)}")
+        return img_data
+    
