@@ -1,9 +1,7 @@
 from datetime import date
-import os
-import tempfile
-import asyncio
 from typing import List
 from pathlib import Path
+import aiohttp
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register, StarTools
@@ -11,15 +9,9 @@ from astrbot.api import logger
 from astrbot.api.message_components import *
 
 # 引入所需的第三方库
-try:
-    from pixivpy3 import AppPixivAPI
-    import requests
-    import img2pdf
-    import io
+from pixivpy3 import AppPixivAPI
+import img2pdf
 
-except ImportError as e:
-    logger.error(f"缺少必要的依赖包: {e}")
-    logger.error("请安装: pip install pixivpy3 pillow reportlab requests")
 
 @register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.3")
 class Pid2PdfPlugin(Star):
@@ -244,35 +236,36 @@ class Pid2PdfPlugin(Star):
             # 使用国内反代
             url = url.replace('i.pximg.net', 'i.pixiv.re')
             # 下载图片
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                # 确定文件扩展名
-                content_type = response.headers.get('content-type', '')
-                if 'jpeg' in content_type or 'jpg' in content_type:
-                    file_extension = 'jpg'
-                elif 'png' in content_type:
-                    file_extension = 'png'
-                elif 'gif' in content_type:
-                    file_extension = 'gif'
-                else:
-                    # 从URL中获取扩展名
-                    file_extension = url.split('.')[-1].split('?')[0]
-                    if file_extension not in ['jpg', 'jpeg', 'png', 'gif']:
-                        file_extension = 'jpg'  # 默认使用jpg
-                
-                file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
-
-                img_data = response.content
-                if modify_hash:
-                    await _image_obfus(img_data)
-                with open(file_path, 'wb') as f:
-                    f.write(img_data)
-                
-                logger.info(f"下载图片 {index}: {file_path}")
-                return file_path
-            else:
-                logger.error(f"下载图片失败，状态码: {response.status_code}")
-                return None
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=30) as response:
+                    if response.status == 200:
+                        # Determine file extension from content type
+                        content_type = response.headers.get('content-type', '')
+                        if 'jpeg' in content_type or 'jpg' in content_type:
+                            file_extension = 'jpg'
+                        elif 'png' in content_type:
+                            file_extension = 'png'
+                        elif 'gif' in content_type:
+                            file_extension = 'gif'
+                        else:
+                            # Get extension from URL
+                            file_extension = url.split('.')[-1].split('?')[0]
+                            if file_extension not in ['jpg', 'jpeg', 'png', 'gif']:
+                                file_extension = 'jpg'  # Default to jpg
+                        
+                        file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
+                        
+                        img_data = await response.read()
+                        if modify_hash:
+                            await _image_obfus(img_data)
+                        with open(file_path, 'wb') as f:
+                            f.write(img_data)
+                        
+                        logger.info(f"下载图片 {index}: {file_path}")
+                        return file_path
+                    else:
+                        logger.error(f"下载图片失败，状态码: {response.status}")
+                        return None
             
         except Exception as e:
             logger.error(f"下载单张图片失败: {e}")
