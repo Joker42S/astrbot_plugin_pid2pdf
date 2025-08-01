@@ -1,5 +1,5 @@
 name: pid2pdf # 插件的唯一识别名
-desc: 一个根据Pixiv ID下载图片并保存为PDF的AstrBot插件 # 插件简短描述
-version: v1.0.2 # 插件版本号
-author: Max # 作者
+desc: 一个根据Pixiv ID下载图片并转换为PDF发送的AstrBot插件，可以有效防止R18图片被企鹅的大手拦截。同时具备直接发送图片，查看排行榜，按作者下载，等功能。 # 插件简短描述
+version: v1.0.3 # 插件版本号
+author: Joker42S # 作者
 repo: https://github.com/Joker42S/astrbot_plugin_pid2pdf # 插件的仓库地址

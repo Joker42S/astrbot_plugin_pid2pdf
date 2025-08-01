@@ -1,3 +1,4 @@
+from datetime import date
 import os
 import tempfile
 import asyncio
@@ -11,7 +12,7 @@ from astrbot.api.message_components import *
 
 # 引入所需的第三方库
 try:
-    from pixivpy3 import ByPassSniApi
+    from pixivpy3 import AppPixivAPI
     import requests
     import img2pdf
     import io
@@ -20,7 +21,7 @@ except ImportError as e:
     logger.error(f"缺少必要的依赖包: {e}")
     logger.error("请安装: pip install pixivpy3 pillow reportlab requests")
 
-@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.0")
+@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.3")
 class Pid2PdfPlugin(Star):
     def __init__(self, context: Context, config : dict):
         super().__init__(context)
@@ -33,13 +34,21 @@ class Pid2PdfPlugin(Star):
     async def initialize(self):
         """插件初始化方法"""
         try:
-            # 初始化Pixiv API
-            self.papi = ByPassSniApi()
             self.plugin_name = "pid2pdf"
             # 从配置中获取refresh_token和代理设置
             self.refresh_token = self.config.get("refresh_token", "")
             self.proxy = self.config.get("proxy", "")
             # 设置代理（如果配置了）
+            _REQUESTS_KWARGS: dict[str, Any] = {
+                'proxies': {
+                    'https': self.proxy,
+                    'http': self.proxy,
+                },
+                # 'verify': False,       # PAPI use https, an easy way is disable requests SSL verify
+            }
+            # 初始化Pixiv API
+            self.papi = AppPixivAPI(**_REQUESTS_KWARGS)
+            # self.papi.set_api_proxy('https://i.pixiv.cat')
             
             # 使用refresh_token登录
             if self.refresh_token:
@@ -104,7 +113,7 @@ class Pid2PdfPlugin(Star):
                 return
             
             # 生成PDF
-            pdf_path = await self._create_pdf(image_paths, pid, artwork_info)
+            pdf_path = await self._create_pdf(image_paths, pid)
             if not pdf_path:
                 yield event.plain_result(f"生成PDF失败")
                 return
@@ -131,17 +140,8 @@ class Pid2PdfPlugin(Star):
             if not pid.isdigit():
                 yield event.plain_result("Pixiv ID必须是数字")
                 return
-            #检查本地是否存在PID的PDF文件
             img_path = self.temp_dir / f"{pid}"
-            if img_path.exists():
-                logger.info(f"本地已存在该PID的图片: {img_path}")
-                # 发送PDF文件
-                async for result in self._send_img(event, img_path, pid):
-                    yield result
-                return
-            
             yield event.plain_result(f"开始获取 Pixiv 作品: {pid}，请稍候...")
-            
             # 获取作品详情
             artwork_info = await self._get_artwork_info(pid)
             if not artwork_info:
@@ -194,7 +194,7 @@ class Pid2PdfPlugin(Star):
             logger.error(f"获取作品信息失败: {e}")
             return None
 
-    async def _download_images(self, artwork_info: dict, pid) -> List[Path]:
+    async def _download_images(self, artwork_info: dict, pid, max_num = 0) -> List[Path]:
         """下载Pixiv图片"""
         try:
             image_paths = []
@@ -209,11 +209,16 @@ class Pid2PdfPlugin(Star):
                     image_paths.append(path)
             elif artwork_info.get("meta_pages"):
                 # 多图作品
+                download_num = 0
                 for i, page in enumerate(artwork_info["meta_pages"]):
                     url = page["image_urls"]["original"]
                     path = await self._download_single_image(url, i, pid)
                     if path:
                         image_paths.append(path)
+                        download_num += 1
+                    if max_num > 0 and download_num >= max_num:
+                        break
+
             
             logger.info(f"下载了 {len(image_paths)} 张图片")
             return image_paths
@@ -236,6 +241,8 @@ class Pid2PdfPlugin(Star):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
             
+            # 使用国内反代
+            url = url.replace('i.pximg.net', 'i.pixiv.re')
             # 下载图片
             response = requests.get(url, headers=headers, timeout=30)
             if response.status_code == 200:
@@ -271,12 +278,12 @@ class Pid2PdfPlugin(Star):
             logger.error(f"下载单张图片失败: {e}")
             return None
 
-    async def _create_pdf(self, image_paths: List[Path], pid: str, artwork_info: dict) -> Path:
+    async def _create_pdf(self, image_paths: List[Path], pdf_name: str) -> Path:
         """将图片转换为PDF"""
         try:
             if not image_paths:
                 return None
-            pdf_path = self.persistent_dir / f"pixiv_{pid}.pdf"
+            pdf_path = self.persistent_dir / f"pixiv_{pdf_name}.pdf"
             # 将图片转换为PDF
             with open(pdf_path, 'wb') as f:
                 f.write(img2pdf.convert(image_paths))
@@ -339,6 +346,377 @@ class Pid2PdfPlugin(Star):
         except Exception as e:
             logger.error(f"清理临时文件失败: {e}")
 
+    @filter.command("pixiv_ranking")
+    async def pixiv_ranking(self, event: AstrMessageEvent):
+        """获取Pixiv排行榜作品并发送"""
+        try:
+            # 解析用户输入的参数
+            message_parts = event.message_str.strip().split()
+            
+            # 设置默认参数
+            mode = "day"  # 默认日榜
+            content = "all"  # 默认全部内容
+            date = None  # 默认当前日期
+            count = 5  # 默认获取5个作品
+            
+            # 解析参数
+            if len(message_parts) >= 2:
+                # 第一个参数是排行榜类型
+                mode_input = message_parts[1].lower()
+                if mode_input in ["day", "week", "month", "day_male", "week_original", "day_manga", "day_r18", "week_r18", "day_ai", "day_r18_ai"]:
+                    mode = mode_input
+                elif mode_input.isdigit():
+                    count = min(int(mode_input), 10)  # 最多10个作品
+            
+            if len(message_parts) >= 3:
+                # 第二个参数可能是数量
+                if message_parts[2].isdigit():
+                    count = min(int(message_parts[2]), 10)
+
+            # 应用R18过滤设置
+            r18_mode = self.config.get("r18_mode", "过滤 R18")
+            if r18_mode == "过滤 R18":
+                if mode in ["day", "week", "month"]:
+                    pass  # 保持原模式，这些模式默认不包含R18
+                else:
+                    mode = "day"  # 强制使用日榜
+            
+            for result in self._process_ranking_request(event, mode, date, count):
+                yield result
+
+        except Exception as e:
+            logger.error(f"获取Pixiv排行榜时出错: {e}")
+            yield event.plain_result(f"获取排行榜时出现错误: {str(e)}")
+
+    async def _process_ranking_request(self, event: AstrMessageEvent, mode: str, date: str, count: int):
+        """Process and send Pixiv ranking request"""
+        yield event.plain_result(f"正在获取Pixiv {mode} 排行榜前 {count} 个作品，请稍候...")
+        
+        # Get ranking data
+        ranking_data = await self._get_ranking(mode, date, count)
+        if not ranking_data:
+            yield event.plain_result("获取排行榜失败，请检查网络连接或稍后重试")
+            return
+        
+        # Send artwork info and images
+        async for result in self._send_ranking_results(event, ranking_data, count, mode):
+            yield result
+    
+    async def _get_ranking(self, mode: str = "day", date: str = None, count: int = 5) -> list:
+        """获取Pixiv排行榜数据"""
+        try:
+            if not self.papi:
+                logger.error("Pixiv API未初始化")
+                return None
+            
+            # 获取排行榜
+            result = self.papi.illust_ranking(mode=mode, date=date)
+            if result.illusts:
+                # 应用AI过滤设置
+                ai_filter_mode = self.config.get("ai_filter_mode", "显示 AI 作品")
+                filtered_illusts = []
+                
+                for illust in result.illusts[:count * 2]:  # 获取更多以便过滤
+                    # AI作品过滤
+                    is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                    
+                    if ai_filter_mode == "过滤 AI 作品" and is_ai:
+                        continue
+                    elif ai_filter_mode == "仅 AI 作品" and not is_ai:
+                        continue
+                    
+                    filtered_illusts.append({
+                        "id": illust.id,
+                        "title": illust.title,
+                        "user": {
+                            "id": illust.user.id,
+                            "name": illust.user.name
+                        },
+                        "meta_single_page": illust.meta_single_page,
+                        "meta_pages": illust.meta_pages,
+                        "total_view": illust.total_view,
+                        "total_bookmarks": illust.total_bookmarks,
+                        "sanity_level": illust.sanity_level,
+                        "is_ai": is_ai
+                    })
+                    
+                    if len(filtered_illusts) >= count:
+                        break
+                
+                return filtered_illusts[:count]
+            else:
+                logger.error("排行榜数据为空")
+                return None
+                
+        except Exception as e:
+            logger.error(f"获取排行榜数据失败: {e}")
+            return None
+    
+    async def _send_ranking_results(self, event: AstrMessageEvent, ranking_data: list, count: int, mode: str):
+        """发送排行榜结果"""
+        try:
+            pdf_img_paths = []
+            combined_infos = ["作品信息：\n"]
+            is_r18 = mode in ["day_r18", "week_r18", "day_r18_ai"]
+            for i, artwork in enumerate(ranking_data, 1):
+                pid = str(artwork["id"])
+                title = artwork["title"]
+                author = artwork["user"]["name"]
+                views = artwork["total_view"]
+                bookmarks = artwork["total_bookmarks"]
+                is_ai = artwork.get("is_ai", False)
+                
+                # 构建作品信息
+                info_text = f"#{i} PID: {pid}\n"
+                info_text += f"标题: {title}\n"
+                info_text += f"作者: {author}\n"
+                # info_text += f"浏览: {views} | 收藏: {bookmarks}"
+                pages = artwork.get("meta_pages")
+                if pages:
+                    info_text += f" | 多图作品，共{len(pages)}张"
+                if is_ai:
+                    info_text += " | AI作品"
+                if is_r18:
+                    combined_infos.append(info_text + "\n\n")
+                else:
+                    yield event.plain_result(info_text)
+                
+                # 下载并发送第一张图片作为预览
+                try:
+                    # 检查本地是否已有图片
+                    img_dir = self.temp_dir / f"{pid}"
+                    if img_dir.exists() and any(img_dir.iterdir()):
+                        # 发送已有的图片
+                        first_img = next(img_dir.iterdir())
+                        if is_r18:
+                            pdf_img_paths.append(str(first_img.absolute()))
+                        else:
+                            yield event.chain_result([Image.fromFileSystem(str(first_img.absolute()))])
+                    else:
+                        # 下载第一张图片
+                        image_paths = await self._download_images(artwork, pid, 1)
+                        if image_paths:
+                            if is_r18:
+                                pdf_img_paths.append(str(image_paths[0].absolute()))
+                            else:
+                                yield event.chain_result([Image.fromFileSystem(str(image_paths[0].absolute()))])
+                        else:
+                            yield event.plain_result("图片下载失败")
+                except Exception as e:
+                    logger.error(f"发送排行榜图片失败: {e}")
+                    yield event.plain_result(f"图片发送失败: {str(e)}")
+                
+                # 添加分隔
+                # if i < len(ranking_data):
+                #     yield event.plain_result("---")
+            if len(pdf_img_paths) > 0:
+                pdf_name = f"{mode}_{date.today()}"
+                pdf_path = await self._create_pdf(pdf_img_paths, pdf_name)
+                if not pdf_path:
+                    yield event.plain_result(f"生成PDF失败")
+                    return
+                yield event.chain_result([File(file=str(pdf_path),name=f"{pdf_name}.pdf")])
+                chain = []
+                for info in combined_infos:
+                    chain.append(Plain(info))
+                node = Node(
+                            uin=905617992,
+                            name="Soulter",
+                            content=chain
+                        )
+                yield event.chain_result([node])
+        except Exception as e:
+            logger.error(f"发送排行榜结果失败: {e}")
+            yield event.plain_result(f"发送结果时出现错误: {str(e)}")
+
+    @filter.command("puid")
+    async def puid(self, event: AstrMessageEvent):
+        """根据画师UID下载最新作品"""
+        try:
+            # 解析用户输入的参数
+            message_parts = event.message_str.strip().split()
+            if len(message_parts) < 2:
+                yield event.plain_result("请提供画师UID，格式: /puid <UID> [数量]")
+                return
+            
+            uid = message_parts[1].strip()
+            if not uid.isdigit():
+                yield event.plain_result("画师UID必须是数字")
+                return
+            
+            # 解析作品数量参数
+            count = 5  # 默认5个作品
+            if len(message_parts) >= 3:
+                try:
+                    count = int(message_parts[2])
+                    count = min(max(count, 1), 10)  # 限制在1-10之间
+                except ValueError:
+                    yield event.plain_result("作品数量必须是数字")
+                    return
+            
+            yield event.plain_result(f"开始获取画师 {uid} 的最新 {count} 个作品，请稍候...")
+            
+            # 获取画师信息和作品列表
+            artist_works = await self._get_artist_works(uid, count)
+            if not artist_works:
+                yield event.plain_result(f"无法获取画师 {uid} 的作品信息")
+                return
+            
+            # 发送画师作品
+            async for result in self._send_artist_works(event, artist_works, uid, count):
+                yield result
+        except Exception as e:
+            logger.error(f"处理画师UID时出错: {e}")
+            yield event.plain_result(f"处理过程中出现错误: {str(e)}")
+    
+    async def _get_artist_works(self, uid: str, count: int = 5) -> list:
+        """获取画师的最新作品"""
+        try:
+            if not self.papi:
+                logger.error("Pixiv API未初始化")
+                return None
+            
+            # 获取画师信息
+            user_detail = self.papi.user_detail(uid)
+            if not user_detail.user:
+                logger.error(f"未找到画师 {uid}")
+                return None
+            
+            artist_name = user_detail.user.name
+            logger.info(f"找到画师: {artist_name} (UID: {uid})")
+            
+            # 获取画师的插画作品
+            result = self.papi.user_illusts(uid)
+            if not result.illusts:
+                logger.error(f"画师 {uid} 没有作品")
+                return None
+            
+            # 应用过滤设置
+            r18_mode = self.config.get("r18_mode", "过滤 R18")
+            ai_filter_mode = self.config.get("ai_filter_mode", "显示 AI 作品")
+            
+            filtered_works = []
+            for illust in result.illusts:
+                # R18过滤
+                if r18_mode == "过滤 R18" and illust.sanity_level >= 4:
+                    continue
+                elif r18_mode == "仅 R18" and illust.sanity_level < 4:
+                    continue
+                
+                # AI作品过滤
+                is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                if ai_filter_mode == "过滤 AI 作品" and is_ai:
+                    continue
+                elif ai_filter_mode == "仅 AI 作品" and not is_ai:
+                    continue
+                
+                filtered_works.append({
+                    "id": illust.id,
+                    "title": illust.title,
+                    "user": {
+                        "id": illust.user.id,
+                        "name": illust.user.name
+                    },
+                    "meta_single_page": illust.meta_single_page,
+                    "meta_pages": illust.meta_pages,
+                    "total_view": illust.total_view,
+                    "total_bookmarks": illust.total_bookmarks,
+                    "sanity_level": illust.sanity_level,
+                    "create_date": illust.create_date,
+                    "is_ai": is_ai
+                })
+                
+                if len(filtered_works) >= count:
+                    break
+            
+            return {
+                "artist_name": artist_name,
+                "artist_uid": uid,
+                "works": filtered_works[:count]
+            }
+            
+        except Exception as e:
+            logger.error(f"获取画师作品失败: {e}")
+            return None
+    
+    async def _send_artist_works(self, event: AstrMessageEvent, artist_data: dict, uid: str, count: int):
+        """发送画师作品结果"""
+        try:
+            artist_name = artist_data["artist_name"]
+            works = artist_data["works"]
+            
+            if not works:
+                yield event.plain_result(f"画师 {artist_name} (UID: {uid}) 没有符合过滤条件的作品")
+                return
+            
+            # 发送画师信息
+            yield event.plain_result(f"画师: {artist_name} (UID: {uid})\n共找到 {len(works)} 个作品")
+            
+            for i, artwork in enumerate(works, 1):
+                pid = str(artwork["id"])
+                title = artwork["title"]
+                views = artwork["total_view"]
+                bookmarks = artwork["total_bookmarks"]
+                create_date = artwork["create_date"][:10]  # 只取日期部分
+                is_ai = artwork.get("is_ai", False)
+                
+                # 构建作品信息
+                info_text = f"#{i} PID: {pid}\n"
+                info_text += f"标题: {title}\n"
+                info_text += f"发布日期: {create_date}\n"
+                # info_text += f"浏览: {views} | 收藏: {bookmarks}"
+                pages = artwork.get("meta_pages")
+                if pages:
+                    info_text += f" | 多图作品，共{len(pages)}张"
+                if is_ai:
+                    info_text += " | AI作品"
+                
+                yield event.plain_result(info_text)
+                
+                # 下载并发送第一张图片作为预览
+                try:
+                    # 检查本地是否已有图片
+                    img_dir = self.temp_dir / f"{pid}"
+                    if img_dir.exists() and any(img_dir.iterdir()):
+                        # 发送已有的图片
+                        first_img = next(img_dir.iterdir())
+                        yield event.chain_result([Image.fromFileSystem(str(first_img.absolute()))])
+                    else:
+                        # 下载第一张图片
+                        image_paths = await self._download_images(artwork, pid, 1)
+                        if image_paths:
+                            yield event.chain_result([Image.fromFileSystem(str(image_paths[0].absolute()))])
+                        else:
+                            yield event.plain_result("图片下载失败")
+                            
+                except Exception as e:
+                    logger.error(f"发送画师作品图片失败: {e}")
+                    yield event.plain_result(f"图片发送失败: {str(e)}")
+                
+                # 添加分隔
+                # if i < len(works):
+                #     yield event.plain_result("---")
+                    
+        except Exception as e:
+            logger.error(f"发送画师作品结果失败: {e}")
+            yield event.plain_result(f"发送结果时出现错误: {str(e)}")
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def handle_text_event(self, event: AstrMessageEvent):
+        """处理文本消息事件"""
+        if event.message_str == "今日色图":
+            async for result in self._process_ranking_request(event, mode = "day_r18", date = None, count = 10):
+                yield result
+        elif event.message_str == "今日ai色图":
+            async for result in self._process_ranking_request(event, mode = "day_r18_ai", date = None, count = 10):
+                yield result
+        elif event.message_str == "今日排行榜":
+            async for result in self._process_ranking_request(event, mode = "day_male", date = None, count = 10):
+                yield result
+        elif event.message_str == "今日ai图":
+            async for result in self._process_ranking_request(event, mode = "day_ai", date = None, count = 10):
+                yield result
+    
     @filter.command("pid_help")
     async def help_command(self, event: AstrMessageEvent):
         """显示插件帮助信息"""
@@ -347,9 +725,30 @@ Pid2Pdf 插件使用说明：
 
 命令格式：
 /pid2pdf <Pixiv_ID> - 根据Pixiv ID下载图片并生成PDF
+/pid <Pixiv_ID> - 根据Pixiv ID下载图片并发送
+/pixiv_ranking [类型] [数量] - 获取Pixiv排行榜作品
+/puid <UID> [数量] - 根据画师UID下载最新作品
+
+排行榜类型：
+- day: 日榜（默认）
+- week: 周榜
+- month: 月榜
+- day_male: 男性向日榜
+- week_original: 原创周榜
+- day_manga: 漫画日榜
+- day_r18: R18日榜
+- week_r18: R18周榜
+- day_ai: AI作品榜
+- day_r18_ai: AI作品榜
 
 示例：
 /pid2pdf 123456789
+/pid 123456789
+/pixiv_ranking day 3
+/pixiv_ranking week
+/pixiv_ranking 5
+/puid 12345678 3
+/puid 87654321
 
         """
         yield event.plain_result(help_text.strip())
