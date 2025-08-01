@@ -228,12 +228,12 @@ class Pid2PdfPlugin(Star):
             return []
 
     async def _download_single_image(self, url: str, index: int, pid, modify_hash = True) -> Path:
+        """下载单张图片"""
         for file_extension in ['jpg', 'png', 'gif']:
             file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
             if file_path.exists():
                 ## 图片已存在，无需重复下载
                 return file_path
-        """下载单张图片"""
         try:
             # 设置请求头
             headers = {
@@ -309,7 +309,7 @@ class Pid2PdfPlugin(Star):
             yield event.plain_result(f"发送PDF文件失败: {str(e)}")
 
     async def _send_img(self, event: AstrMessageEvent, img_path: Path, pid: str, fake_record = False):
-        """发送PDF文件给用户"""
+        """发送图片文件给用户"""
         try:
             if img_path.exists():
                 chain = [Plain(f'PID：{pid}')]
@@ -703,7 +703,7 @@ class Pid2PdfPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def handle_text_event(self, event: AstrMessageEvent):
-        """处理文本消息事件"""
+        """简易命令： 今日色图 今日ai色图 今日排行榜 今日ai图"""
         if event.message_str == "今日色图":
             async for result in self._process_ranking_request(event, mode = "day_r18", date = None, count = 10):
                 yield result
@@ -761,7 +761,6 @@ Pid2Pdf 插件配置状态：
 
 Pixiv API状态: {'已登录' if self.papi and self.refresh_token else '未配置'}
 代理设置: {self.proxy if self.proxy else '未设置'}
-临时目录: {self.temp_dir if self.temp_dir else '未创建'}
 
 如需配置，请在插件配置文件中设置：
 - pixiv_refresh_token: 您的Pixiv refresh_token
