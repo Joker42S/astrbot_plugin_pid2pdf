@@ -257,7 +257,7 @@ class Pid2PdfPlugin(Star):
                         
                         img_data = await response.read()
                         if modify_hash:
-                            await _image_obfus(img_data)
+                            img_data = await _image_obfus(img_data)
                         with open(file_path, 'wb') as f:
                             f.write(img_data)
                         
