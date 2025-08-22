@@ -6,8 +6,6 @@
 - [x] 配置refresh_token 登录 Pixiv API
 - [x] `/pid2pdf <PID>` 下载图片并打包为PDF文件发送
 - [x] `/pid <PID>` 图片直传模式
-- [x] `/pixiv_ranking [类型] [数量]` 获取Pixiv排行榜作品并发送
-- [x] `/puid <UID> [数量]` 根据画师UID下载最新作品
 - [x] R18内容过滤配置
 - [x] AI生成作品过滤配置
 - [x] 下载排行榜作品
@@ -37,21 +35,13 @@ cd /path/to/astrbot/plugins
 git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 ```
 
-2. **安装依赖包**
-```bash
-cd astrbot_plugin_pid2pdf
-pip install -r requirements.txt
-```
-
+2. **重启AstrBot**
+ 
 3. **配置参数**
    - 获取Pixiv refresh_token
    - 在插件配置中设置token信息
    - 配置可正常访问pixiv网站的代理
 
-4. **重启AstrBot**
-```bash
-# 重启AstrBot服务
-```
 
 ## 📖 使用方法
 
