@@ -10,7 +10,20 @@
   "proxy": {
     "description": "代理地址",
     "type": "string",
-    "hint": "代理地址",
+    "hint": "网络代理地址",
+    "default": "",
+    "is_sensitive": true
+  },  
+  "use_reverse_proxy": {
+    "description": "是否使用反代",
+    "type": "bool",
+    "hint": "下载时是否使用反代地址而不是代理地址",
+    "default": false
+  },
+    "reverse_proxy": {
+    "description": "反代地址",
+    "type": "string",
+    "hint": "下载图片时使用的反向代理地址",
     "default": "",
     "is_sensitive": true
   },
@@ -35,5 +48,23 @@
           "过滤 AI 作品",
           "仅 AI 作品"
       ]
+  },
+  "easter_egg": {
+      "description": "随机彩蛋开关",
+      "type": "bool",
+      "hint": "收到消息时随机触发今日排行榜",
+      "default": "false"
+  },
+  "refresh_interval": {
+      "description": "订阅刷新间隔",
+      "type": "int",
+      "hint": "单位分钟",
+      "default": "90"
+  },
+  "easter_egg_list": {
+      "description": "随机彩蛋范围",
+      "type": "list",
+      "hint": "触发时从列表中选择随意一个排行榜执行, 可选范围：今日色图， 今日ai色图, 今日排行榜, 今日ai图",
+      "default": ["今日色图", "今日ai色图", "今日排行榜", "今日ai图"]
   }
 }
