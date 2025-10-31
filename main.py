@@ -137,11 +137,11 @@ class Pid2PdfPlugin(Star):
             title = artwork_info["title"]
             views = artwork_info["total_view"]
             bookmarks = artwork_info["total_bookmarks"]
-            create_date = artwork_info["create_date"][:10]  # 只取日期部分
+            # create_date = artwork_info["create_date"][:10]  # 只取日期部分
             is_ai = artwork_info.get("is_ai", False)
             info_text = f"#PID: {pid}\n"
             info_text += f"标题: {title}\n"
-            info_text += f"发布日期: {create_date}\n"
+            # info_text += f"发布日期: {create_date}\n"
             # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
             if pages:
@@ -195,11 +195,11 @@ class Pid2PdfPlugin(Star):
             title = artwork_info["title"]
             views = artwork_info["total_view"]
             bookmarks = artwork_info["total_bookmarks"]
-            create_date = artwork_info["create_date"][:10]  # 只取日期部分
+            # create_date = artwork_info["create_date"][:10]  # 只取日期部分
             is_ai = artwork_info.get("is_ai", False)
             info_text = f"#PID: {pid}\n"
             info_text += f"标题: {title}\n"
-            info_text += f"发布日期: {create_date}\n"
+            # info_text += f"发布日期: {create_date}\n"
             # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
             if pages:
@@ -711,7 +711,7 @@ class Pid2PdfPlugin(Star):
                     "total_view": illust.total_view,
                     "total_bookmarks": illust.total_bookmarks,
                     "sanity_level": illust.sanity_level,
-                    "create_date": illust.create_date,
+                    # "create_date": illust.create_date,
                     "is_ai": is_ai
                 })
                 
@@ -737,13 +737,13 @@ class Pid2PdfPlugin(Star):
                 title = artwork["title"]
                 views = artwork["total_view"]
                 bookmarks = artwork["total_bookmarks"]
-                create_date = artwork["create_date"][:10]  # 只取日期部分
+                # create_date = artwork["create_date"][:10]  # 只取日期部分
                 is_ai = artwork.get("is_ai", False)
                 
                 # 构建作品信息
                 info_text = f"#{i} PID: {pid}\n"
                 info_text += f"标题: {title}\n"
-                info_text += f"发布日期: {create_date}\n"
+                # info_text += f"发布日期: {create_date}\n"
                 # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                 pages = artwork.get("meta_pages")
                 if pages:
@@ -863,11 +863,11 @@ class Pid2PdfPlugin(Star):
                     title = artwork_info["title"]
                     views = artwork_info["total_view"]
                     bookmarks = artwork_info["total_bookmarks"]
-                    create_date = artwork_info["create_date"][:10]  # 只取日期部分
+                    # create_date = artwork_info["create_date"][:10]  # 只取日期部分
                     is_ai = artwork_info.get("is_ai", False)
                     info_text = f"#PID: {pid}\n"
                     info_text += f"标题: {title}\n"
-                    info_text += f"发布日期: {create_date}\n"
+                    # info_text += f"发布日期: {create_date}\n"
                     # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                     # pages = artwork_info.get("meta_pages")
                     # if pages:
