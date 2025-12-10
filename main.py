@@ -727,7 +727,91 @@ class Pid2PdfPlugin(Star):
         except Exception as e:
             logger.error(f"获取画师作品失败: {e}")
             return None
-    
+
+    async def _get_artist_mangas(self, uid: str, count: int = 5) -> list:
+        """获取画师的最新漫画"""
+        try:
+            if not self.papi:
+                logger.error("Pixiv API未初始化")
+                return None
+            
+            # 获取画师信息
+            for i in range(3):
+                user_detail = self.papi.user_detail(uid)
+                if user_detail.user:
+                    break
+                else:
+                    logger.info("尝试重新登录Pixiv")
+                    self.papi.auth(refresh_token=self.refresh_token)
+                    await asyncio.sleep(1)
+            if not user_detail.user:
+                logger.error(f"未找到画师 {uid}")
+                return None
+            
+            artist_name = user_detail.user.name
+            logger.info(f"找到画师: {artist_name} (UID: {uid})")
+            
+            # 获取画师的插画作品
+            for i in range(3):
+                result = self.papi.user_illusts(uid, "manga")
+                if result.illusts is not None:
+                    break
+                # else:
+                #     logger.info("尝试重新登录Pixiv")
+                #     self.papi.auth(refresh_token=self.refresh_token)
+                #     await asyncio.sleep(1)
+            if not result.illusts:
+                logger.error(f"画师 {uid} 没有作品")
+                return None
+            
+            # 应用过滤设置
+            r18_mode = self.config.get("r18_mode", "过滤 R18")
+            ai_filter_mode = self.config.get("ai_filter_mode", "显示 AI 作品")
+            
+            filtered_works = []
+            for illust in result.illusts:
+                # R18过滤
+                if r18_mode == "过滤 R18" and illust.sanity_level >= 4:
+                    continue
+                elif r18_mode == "仅 R18" and illust.sanity_level < 4:
+                    continue
+                
+                # AI作品过滤
+                is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                if ai_filter_mode == "过滤 AI 作品" and is_ai:
+                    continue
+                elif ai_filter_mode == "仅 AI 作品" and not is_ai:
+                    continue
+                
+                filtered_works.append({
+                    "id": illust.id,
+                    "title": illust.title,
+                    "user": {
+                        "id": illust.user.id,
+                        "name": illust.user.name
+                    },
+                    "meta_single_page": illust.meta_single_page,
+                    "meta_pages": illust.meta_pages,
+                    "total_view": illust.total_view,
+                    "total_bookmarks": illust.total_bookmarks,
+                    "sanity_level": illust.sanity_level,
+                    # "create_date": illust.create_date,
+                    "is_ai": is_ai
+                })
+                
+                if len(filtered_works) >= count:
+                    break
+            
+            return {
+                "artist_name": artist_name,
+                "artist_uid": uid,
+                "works": filtered_works[:count]
+            }
+            
+        except Exception as e:
+            logger.error(f"获取画师作品失败: {e}")
+            return None
+        
     async def _send_artist_works(self, event: AstrMessageEvent, artist_data: dict, uid: str, count: int):
         """发送画师作品结果"""
         try:
@@ -833,63 +917,72 @@ class Pid2PdfPlugin(Star):
                 user_id = sub_data["user_id"]
                 sub_groups = sub_data["sub_groups"]
                 last_updated_id = sub_data["last_updated_id"]
-                # 获取最新作品
-                artist_works = await self._get_artist_works(user_id, 10)
-                if not artist_works:
-                    logger.error(f"无法获取画师 {user_id} 的作品信息")
-                    continue
-                artist_name = artist_works["artist_name"]
-                works = artist_works["works"] or []
-                works.sort(key=lambda x: int(x["id"]), reverse=True)
-                new_works = []
                 new_updated_id = int(last_updated_id)
-                for artwork_info in works:
-                    new_updated_id = max(new_updated_id, int(artwork_info["id"]))
-                    if int(artwork_info["id"]) <= int(last_updated_id):
-                        break
-                    new_works.append(artwork_info)
-                new_works = new_works[:5]
-                # 更新最后作品ID
-                if new_updated_id > int(last_updated_id):
-                    await self.sub_center.renew_last_updated_id(user_id, new_updated_id)
-                if len(new_works) == 0:
-                    logger.info(f"画师 {artist_name} (UID: {user_id}) 没有符合过滤条件的新作品")
-                    continue
-                for group_id in sub_groups:
-                    await self.context.send_message(group_id, MessageChain().message(f"画师: {artist_name} (UID: {user_id})\n有 {len(new_works)} 个新作品"))
-                for artwork_info in new_works:
-                    #发送作品信息
-                    pid = str(artwork_info["id"])
-                    title = artwork_info["title"]
-                    views = artwork_info["total_view"]
-                    bookmarks = artwork_info["total_bookmarks"]
-                    # create_date = artwork_info["create_date"][:10]  # 只取日期部分
-                    is_ai = artwork_info.get("is_ai", False)
-                    info_text = f"#PID: {pid}\n"
-                    info_text += f"标题: {title}\n"
-                    # info_text += f"发布日期: {create_date}\n"
-                    # info_text += f"浏览: {views} | 收藏: {bookmarks}"
-                    # pages = artwork_info.get("meta_pages")
-                    # if pages:
-                        # info_text += f" | 多图作品，共{len(pages)}张"
-                    if is_ai:
-                        info_text += "AI作品"
-                    for group_id in sub_groups:
-                        await self.context.send_message(group_id, MessageChain().message(info_text))
-
-                    # 下载图片
-                    image_paths = await self._download_images(artwork_info, pid)
-                    if not image_paths:
-                        logger.info(f"下载PID {pid} 的图片失败")
+                # 获取最新插图和漫画
+                for content_type in ["插画", "漫画"]:
+                    artist_works = None
+                    if content_type == "插画":
+                        artist_works = await self._get_artist_works(user_id, 10)
                     else:
-                        img_msg_chain = MessageChain()
-                        for img in image_paths:
-                            img_msg_chain = img_msg_chain.file_image(str(img.absolute()))
+                        continue
+                        artist_works = await self._get_artist_mangas(user_id, 1)
+                    if not artist_works:
+                        logger.error(f"无法获取画师 {user_id} 的 {content_type} 作品信息")
+                        continue
+                    artist_name = artist_works["artist_name"]
+                    works = artist_works["works"] or []
+                    works.sort(key=lambda x: int(x["id"]), reverse=True)
+                    new_works = []
+                    #单一类型的最新作品id
+                    _new_updated_id_single_type = int(last_updated_id)
+                    for artwork_info in works:
+                        _new_updated_id_single_type = max(_new_updated_id_single_type, int(artwork_info["id"]))
+                        if int(artwork_info["id"]) <= int(last_updated_id):
+                            break
+                        new_works.append(artwork_info)
+                    new_works = new_works[:5]
+                    # 更新最后作品ID
+                    if _new_updated_id_single_type > new_updated_id:
+                        new_updated_id = _new_updated_id_single_type
+                        await self.sub_center.renew_last_updated_id(user_id, new_updated_id)
+                    if len(new_works) == 0:
+                        logger.info(f"画师 {artist_name} (UID: {user_id}) 没有符合过滤条件的 {content_type} 新作品")
+                        continue
+                    for group_id in sub_groups:
+                        await self.context.send_message(group_id, MessageChain().message(f"画师: {artist_name} (UID: {user_id})\n有 {len(new_works)} 个{content_type}新作品"))
+                    for artwork_info in new_works:
+                        #发送作品信息
+                        pid = str(artwork_info["id"])
+                        title = artwork_info["title"]
+                        views = artwork_info["total_view"]
+                        bookmarks = artwork_info["total_bookmarks"]
+                        # create_date = artwork_info["create_date"][:10]  # 只取日期部分
+                        is_ai = artwork_info.get("is_ai", False)
+                        info_text = f"#PID: {pid}\n"
+                        info_text += f"标题: {title}\n"
+                        # info_text += f"发布日期: {create_date}\n"
+                        # info_text += f"浏览: {views} | 收藏: {bookmarks}"
+                        # pages = artwork_info.get("meta_pages")
+                        # if pages:
+                            # info_text += f" | 多图作品，共{len(pages)}张"
+                        if is_ai:
+                            info_text += "AI作品"
                         for group_id in sub_groups:
-                            try:
-                                await self.context.send_message(group_id, img_msg_chain)
-                            except Exception as e:
-                                logger.error(f"发送订阅图片失败，{e}")
+                            await self.context.send_message(group_id, MessageChain().message(info_text))
+
+                        # 下载图片
+                        image_paths = await self._download_images(artwork_info, pid)
+                        if not image_paths:
+                            logger.info(f"下载PID {pid} 的图片失败")
+                        else:
+                            img_msg_chain = MessageChain()
+                            for img in image_paths:
+                                img_msg_chain = img_msg_chain.file_image(str(img.absolute()))
+                            for group_id in sub_groups:
+                                try:
+                                    await self.context.send_message(group_id, img_msg_chain)
+                                except Exception as e:
+                                    logger.error(f"发送订阅图片失败，{e}")
         except Exception as e:
             logger.error(f"更新订阅时出错： {e}")
 
