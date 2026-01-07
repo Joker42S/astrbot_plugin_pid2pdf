@@ -303,27 +303,28 @@ class Pid2PdfPlugin(Star):
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, timeout=30, proxy=proxy) as response:
                     if response.status == 200:
-                        # Determine file extension from content type
-                        content_type = response.headers.get('content-type', '')
-                        if 'jpeg' in content_type or 'jpg' in content_type:
-                            file_extension = 'jpg'
-                        elif 'png' in content_type:
-                            file_extension = 'png'
-                        elif 'gif' in content_type:
-                            file_extension = 'gif'
-                        else:
-                            # Get extension from URL
-                            file_extension = url.split('.')[-1].split('?')[0]
-                            if file_extension not in ['jpg', 'jpeg', 'png', 'gif']:
-                                file_extension = 'jpg'  # Default to jpg
+                        # # Determine file extension from content type
+                        # content_type = response.headers.get('content-type', '')
+                        # if 'jpeg' in content_type or 'jpg' in content_type:
+                        #     file_extension = 'jpg'
+                        # elif 'png' in content_type:
+                        #     file_extension = 'png'
+                        # elif 'gif' in content_type:
+                        #     file_extension = 'gif'
+                        # else:
+                        #     # Get extension from URL
+                        #     file_extension = url.split('.')[-1].split('?')[0]
+                        #     if file_extension not in ['jpg', 'jpeg', 'png', 'gif']:
+                        #         file_extension = 'jpg'  # Default to jpg
                         
-                        file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
+                        # file_path = self.temp_dir / f"{pid}/image_{index}.{file_extension}"
+                        file_path = self.temp_dir / f"{pid}/image_{index}.jpg"
                         
                         img_data = await response.read()
                         if modify_hash:
                             img_data = await _image_obfus(img_data)
-                        with open(file_path, 'wb') as f:
-                            f.write(img_data)
+                        async with aiofiles.open(file_path, 'wb') as f:
+                            await f.write(img_data)
                         
                         # logger.info(f"下载图片 {index}: {file_path}")
                         return file_path
