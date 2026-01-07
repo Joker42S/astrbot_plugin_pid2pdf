@@ -145,7 +145,7 @@ class Pid2PdfPlugin(Star):
             # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
             if pages:
-                info_text += f" | 多图作品，共{len(pages)}张"
+                info_text += f"多图作品，共{len(pages)}张"
             if is_ai:
                 info_text += " | AI作品"
             yield event.plain_result(info_text)
@@ -203,7 +203,7 @@ class Pid2PdfPlugin(Star):
             # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
             if pages:
-                info_text += f" | 多图作品，共{len(pages)}张"
+                info_text += f"多图作品，共{len(pages)}张"
             if is_ai:
                 info_text += " | AI作品"
             yield event.plain_result(info_text)
@@ -369,21 +369,29 @@ class Pid2PdfPlugin(Star):
     async def _send_img(self, event: AstrMessageEvent, img_path: Path, pid: str, fake_record = False):
         """发送图片文件给用户"""
         try:
-            if img_path.exists():
+            if img_path.exists():_download_images
                 chain = [Plain(f'PID：{pid}')]
+                chains = [chain]
                 for img in img_path.iterdir():
                     if not img.is_file():
                         continue
-                    chain.append(Image.fromFileSystem(str(img.absolute())))
+                    if len(chain) >= 10:
+                        chain = []
+                        chain.append(Image.fromFileSystem(str(img.absolute())))
+                        chains.append(chain)
+                    else:
+                        chain.append(Image.fromFileSystem(str(img.absolute())))
                 if fake_record:
-                    node = Node(
-                            uin=905617992,
-                            name="Soulter",
-                            content=chain
-                        )
-                    yield event.chain_result([node])
+                    for chain in chains:
+                        node = Node(
+                                uin=event.get_self_id(),
+                                name="AstrBot",
+                                content=chain
+                            )
+                        yield event.chain_result([node])
                 else:
-                    yield event.chain_result(chain)
+                    for chain in chains:
+                        yield event.chain_result(chain)
                 # logger.info(f"图片已送: {pid}")
                 yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
             else:
@@ -538,7 +546,7 @@ class Pid2PdfPlugin(Star):
                 # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                 pages = artwork.get("meta_pages")
                 if pages:
-                    info_text += f" | 多图作品，共{len(pages)}张"
+                    info_text += f"多图作品，共{len(pages)}张"
                 if is_ai:
                     info_text += " | AI作品"
                 if is_r18:
@@ -830,7 +838,7 @@ class Pid2PdfPlugin(Star):
                 # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                 pages = artwork.get("meta_pages")
                 if pages:
-                    info_text += f" | 多图作品，共{len(pages)}张"
+                    info_text += f"多图作品，共{len(pages)}张"
                 if is_ai:
                     info_text += " | AI作品"
                 
@@ -961,16 +969,16 @@ class Pid2PdfPlugin(Star):
                         info_text += f"标题: {title}\n"
                         # info_text += f"发布日期: {create_date}\n"
                         # info_text += f"浏览: {views} | 收藏: {bookmarks}"
-                        # pages = artwork_info.get("meta_pages")
-                        # if pages:
-                            # info_text += f" | 多图作品，共{len(pages)}张"
+                        pages = artwork_info.get("meta_pages")
+                        if pages:
+                            info_text += f"多图作品，共{len(pages)}张"
                         if is_ai:
                             info_text += "AI作品"
                         for group_id in sub_groups:
                             await self.context.send_message(group_id, MessageChain().message(info_text))
 
                         # 下载图片
-                        image_paths = await self._download_images(artwork_info, pid)
+                        image_paths = await self._download_images(artwork_info, pid, 10)
                         if not image_paths:
                             logger.info(f"下载PID {pid} 的图片失败")
                         else:
