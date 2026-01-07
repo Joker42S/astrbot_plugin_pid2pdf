@@ -369,7 +369,7 @@ class Pid2PdfPlugin(Star):
     async def _send_img(self, event: AstrMessageEvent, img_path: Path, pid: str, fake_record = False):
         """发送图片文件给用户"""
         try:
-            if img_path.exists():_download_images
+            if img_path.exists():
                 chain = [Plain(f'PID：{pid}')]
                 chains = [chain]
                 for img in img_path.iterdir():
