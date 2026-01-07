@@ -113,7 +113,7 @@ class Pid2PdfPlugin(Star):
             #检查本地是否存在PID的PDF文件
             pdf_path = self.persistent_dir / f"pixiv_{pid}.pdf"
             if pdf_path.exists():
-                logger.info(f"本地已存在该PID的PDF文件: {pdf_path}")
+                # logger.info(f"本地已存在该PID的PDF文件: {pdf_path}")
                 # 发送PDF文件
                 async for result in self._send_pdf(event, pdf_path, pid):
                     yield result
@@ -273,9 +273,7 @@ class Pid2PdfPlugin(Star):
                         download_num += 1
                     if max_num > 0 and download_num >= max_num:
                         break
-
-            
-            logger.info(f"下载了 {len(image_paths)} 张图片")
+            # logger.info(f"下载了 {len(image_paths)} 张图片")
             return image_paths
             
         except Exception as e:
@@ -327,7 +325,7 @@ class Pid2PdfPlugin(Star):
                         with open(file_path, 'wb') as f:
                             f.write(img_data)
                         
-                        logger.info(f"下载图片 {index}: {file_path}")
+                        # logger.info(f"下载图片 {index}: {file_path}")
                         return file_path
                     else:
                         logger.error(f"下载图片失败，状态码: {response.status}")
@@ -346,7 +344,7 @@ class Pid2PdfPlugin(Star):
             # 将图片转换为PDF
             with open(pdf_path, 'wb') as f:
                 f.write(img2pdf.convert(image_paths))
-            logger.info(f"生成PDF: {pdf_path}")
+            # logger.info(f"生成PDF: {pdf_path}")
             return pdf_path
             
         except Exception as e:
@@ -359,7 +357,7 @@ class Pid2PdfPlugin(Star):
             if pdf_path.exists():
                 # 发送文件
                 yield event.chain_result([File(file=str(pdf_path),name=f"{pid}.pdf")])
-                logger.info(f"PDF文件已生成并发送: {pid}.pdf")
+                # logger.info(f"PDF文件已生成并发送: {pid}.pdf")
             else:
                 yield event.plain_result("PDF文发送失败")
             
@@ -385,7 +383,7 @@ class Pid2PdfPlugin(Star):
                     yield event.chain_result([node])
                 else:
                     yield event.chain_result(chain)
-                logger.info(f"图片已送: {pid}")
+                # logger.info(f"图片已送: {pid}")
                 yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
             else:
                 yield event.plain_result("图片发送失败")
@@ -665,7 +663,7 @@ class Pid2PdfPlugin(Star):
                 return None
             
             artist_name = user_detail.user.name
-            logger.info(f"找到画师: {artist_name} (UID: {uid})")
+            # logger.info(f"找到画师: {artist_name} (UID: {uid})")
             
             # 获取画师的插画作品
             for i in range(3):
@@ -749,7 +747,7 @@ class Pid2PdfPlugin(Star):
                 return None
             
             artist_name = user_detail.user.name
-            logger.info(f"找到画师: {artist_name} (UID: {uid})")
+            # logger.info(f"找到画师: {artist_name} (UID: {uid})")
             
             # 获取画师的插画作品
             for i in range(3):
@@ -946,7 +944,7 @@ class Pid2PdfPlugin(Star):
                         new_updated_id = _new_updated_id_single_type
                         await self.sub_center.renew_last_updated_id(user_id, new_updated_id)
                     if len(new_works) == 0:
-                        logger.info(f"画师 {artist_name} (UID: {user_id}) 没有符合过滤条件的 {content_type} 新作品")
+                        # logger.info(f"画师 {artist_name} (UID: {user_id}) 没有符合过滤条件的 {content_type} 新作品")
                         continue
                     for group_id in sub_groups:
                         await self.context.send_message(group_id, MessageChain().message(f"画师: {artist_name} (UID: {user_id})\n有 {len(new_works)} 个{content_type}新作品"))
@@ -1122,7 +1120,7 @@ async def _image_obfus(img_data):
                     pixels[x, y] = (new_r, new_g, new_b)
 
                 with BytesIO() as output:
-                    img.save(output, format="PNG")
+                    img.save(output, format="JPEG", quality=95, subsampling=0)
                     return output.getvalue()
 
     except Exception as e:
