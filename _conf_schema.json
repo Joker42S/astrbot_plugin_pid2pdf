@@ -55,6 +55,12 @@
       "hint": "收到消息时随机触发今日排行榜",
       "default": "false"
   },
+    "enable_subscription": {
+    "description": "启用订阅",
+    "type": "bool",
+    "hint": "是否启用订阅功能",
+    "default": false
+  },
   "refresh_interval": {
       "description": "订阅刷新间隔",
       "type": "int",

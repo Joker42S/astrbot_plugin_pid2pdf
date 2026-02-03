@@ -32,6 +32,7 @@ class Pid2PdfPlugin(Star):
         self.use_reverse_proxy = False
         self.egg_trigger_time = 0
         self.egg_trigger_record_file = None
+        self.enable_subscription = False
 
     async def initialize(self):
         """插件初始化方法"""
@@ -45,6 +46,7 @@ class Pid2PdfPlugin(Star):
             self.refresh_interval = self.config.get("refresh_interval", 90)
             self.easter_egg = self.config.get("easter_egg", False)
             self.easter_egg_list = self.config.get("easter_egg_list", [])
+            self.enable_subscription = self.config.get("enable_subscription", False)
             
             # 设置代理（如果配置了）
             _REQUESTS_KWARGS: dict[str, Any] = {
@@ -89,8 +91,9 @@ class Pid2PdfPlugin(Star):
                     self.egg_trigger_time = 0
             self.sub_center = SubscriptionCenter(str(self.persistent_dir / "subscriptions.json"), self.refresh_interval * 60)
             await self.sub_center.initilize()
-            self.sub_center.set_callback(self._handle_sub_update)
-            self.sub_center.start_timer()
+            if self.enable_subscription:
+                self.sub_center.set_callback(self._handle_sub_update)
+                self.sub_center.start_timer()
             logger.info(f"Pid2Pdf插件初始化完成，临时目录: {self.temp_dir}")
             
         except Exception as e:
@@ -874,6 +877,9 @@ class Pid2PdfPlugin(Star):
 
     @filter.command("订阅画师")
     async def add_sub(self, event: AstrMessageEvent):
+        if not self.enable_subscription:
+            yield event.plain_result("订阅功能未开启")
+            return
         """订阅画师最新作品"""
         # 解析用户输入的参数
         message_parts = event.message_str.strip().split()
@@ -893,6 +899,9 @@ class Pid2PdfPlugin(Star):
 
     @filter.command("删除订阅")
     async def remove_sub(self, event: AstrMessageEvent):
+        if not self.enable_subscription:
+            yield event.plain_result("订阅功能未开启")
+            return
         """删除订阅"""
         # 解析用户输入的参数
         message_parts = event.message_str.strip().split()
@@ -915,6 +924,9 @@ class Pid2PdfPlugin(Star):
 
     @filter.command("/刷新订阅")
     async def refresh_subscriptions(self, event: AstrMessageEvent):
+        if not self.enable_subscription:
+            yield event.plain_result("订阅功能未开启")
+            return
         await self.sub_center.manual_refresh()
 
     async def _handle_sub_update(self, sub_data_list: list[SubscriptionData]):
