@@ -596,8 +596,8 @@ class Pid2PdfPlugin(Star):
                 for info in combined_infos:
                     chain.append(Plain(info))
                 node = Node(
-                            uin=905617992,
-                            name="Soulter",
+                            uin=event.get_self_id(),
+                            name="AstrBot",
                             content=chain
                         )
                 yield event.chain_result([node])
@@ -922,7 +922,7 @@ class Pid2PdfPlugin(Star):
         else:
             yield event.plain_result(f"删除订阅失败")
 
-    @filter.command("/刷新订阅")
+    @filter.command("刷新订阅")
     async def refresh_subscriptions(self, event: AstrMessageEvent):
         if not self.enable_subscription:
             yield event.plain_result("订阅功能未开启")
@@ -1022,8 +1022,6 @@ class Pid2PdfPlugin(Star):
         elif event.message_str == "今日ai图":
             async for result in self._process_ranking_request(event, mode = "day_ai", date = None, count = 10):
                 yield result
-        elif event.message_str == "刷新订阅":
-            await self.sub_center.manual_refresh()
         #彩蛋 随机排行榜 超过一天后可再次触发，几率10%
         elif self.easter_egg and int(datetime.now().timestamp()) - self.egg_trigger_time > 86400 and random.random() < 0.1:
             self.egg_trigger_time = int(datetime.now().timestamp())
