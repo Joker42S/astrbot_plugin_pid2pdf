@@ -44,6 +44,7 @@ class Pid2PdfPlugin(Star):
             self.use_reverse_proxy = self.config.get("use_reverse_proxy", False)
             self.reverse_proxy = self.config.get("reverse_proxy", "")
             self.refresh_interval = self.config.get("refresh_interval", 90)
+            self.max_sanity_level = self.config.get("max_sanity_level", 4)
             self.easter_egg = self.config.get("easter_egg", False)
             self.easter_egg_list = self.config.get("easter_egg_list", [])
             self.enable_subscription = self.config.get("enable_subscription", False)
@@ -697,9 +698,9 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                if r18_mode == "过滤 R18" and illust.sanity_level >= 4:
+                if r18_mode == "过滤 R18" and illust.sanity_level > self.max_sanity_level:
                     continue
-                elif r18_mode == "仅 R18" and illust.sanity_level < 4:
+                elif r18_mode == "仅 R18" and illust.sanity_level <= self.max_sanity_level:
                     continue
                 
                 # AI作品过滤
@@ -781,9 +782,9 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                if r18_mode == "过滤 R18" and illust.sanity_level >= 4:
+                if r18_mode == "过滤 R18" and illust.sanity_level > self.max_sanity_level:
                     continue
-                elif r18_mode == "仅 R18" and illust.sanity_level < 4:
+                elif r18_mode == "仅 R18" and illust.sanity_level <= self.max_sanity_level:
                     continue
                 
                 # AI作品过滤
@@ -933,6 +934,7 @@ class Pid2PdfPlugin(Star):
         logger.info("开始更新订阅")
         try:
             for sub_data in sub_data_list:
+                await asyncio.sleep(10)
                 user_id = sub_data["user_id"]
                 sub_groups = sub_data["sub_groups"]
                 last_updated_id = sub_data["last_updated_id"]
@@ -970,6 +972,7 @@ class Pid2PdfPlugin(Star):
                     for group_id in sub_groups:
                         await self.context.send_message(group_id, MessageChain().message(f"画师: {artist_name} (UID: {user_id})\n有 {len(new_works)} 个{content_type}新作品"))
                     for artwork_info in new_works:
+                        await asyncio.sleep(3)
                         #发送作品信息
                         pid = str(artwork_info["id"])
                         title = artwork_info["title"]
@@ -977,6 +980,7 @@ class Pid2PdfPlugin(Star):
                         bookmarks = artwork_info["total_bookmarks"]
                         # create_date = artwork_info["create_date"][:10]  # 只取日期部分
                         is_ai = artwork_info.get("is_ai", False)
+                        is_r18 = artwork_info.get("sanity_level", 0) > self.max_sanity_level
                         info_text = f"#PID: {pid}\n"
                         info_text += f"标题: {title}\n"
                         # info_text += f"发布日期: {create_date}\n"
@@ -995,8 +999,16 @@ class Pid2PdfPlugin(Star):
                             logger.info(f"下载PID {pid} 的图片失败")
                         else:
                             img_msg_chain = MessageChain()
-                            for img in image_paths:
-                                img_msg_chain = img_msg_chain.file_image(str(img.absolute()))
+                            if is_r18:
+                                # 生成PDF
+                                pdf_path = await self._create_pdf(image_paths, pid)
+                                if not pdf_path:
+                                    img_msg_chain = img_msg_chain.message("生成pdf失败")
+                                else:
+                                    img_msg_chain.chain = [File(file=str(pdf_path.absolute()), name=f"{pid}.pdf")]
+                            else:
+                                for img in image_paths:
+                                    img_msg_chain = img_msg_chain.file_image(str(img.absolute()))
                             for group_id in sub_groups:
                                 try:
                                     await self.context.send_message(group_id, img_msg_chain)
@@ -1007,7 +1019,7 @@ class Pid2PdfPlugin(Star):
 
 
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def handle_text_event(self, event: AstrMessageEvent):
         """简易命令： 今日色图 今日ai色图 今日排行榜 今日ai图 刷新订阅"""
         if event.message_str == "今日色图":
