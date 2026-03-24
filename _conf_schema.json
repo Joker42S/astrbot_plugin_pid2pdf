@@ -66,12 +66,6 @@
       "type": "int",
       "hint": "单位分钟",
       "default": "90"
-  },  
-  "max_sanity_level": {
-      "description": "R18过滤等级",
-      "type": "int",
-      "hint": "过滤R18内容时的分级标准：4->允许轻度NSFW，5->允许强NSFW，6->允许R18，8->允许R18G",
-      "default": 4
   },
   "easter_egg_list": {
       "description": "随机彩蛋范围",

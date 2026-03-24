@@ -44,7 +44,6 @@ class Pid2PdfPlugin(Star):
             self.use_reverse_proxy = self.config.get("use_reverse_proxy", False)
             self.reverse_proxy = self.config.get("reverse_proxy", "")
             self.refresh_interval = self.config.get("refresh_interval", 90)
-            self.max_sanity_level = self.config.get("max_sanity_level", 4)
             self.easter_egg = self.config.get("easter_egg", False)
             self.easter_egg_list = self.config.get("easter_egg_list", [])
             self.enable_subscription = self.config.get("enable_subscription", False)
@@ -197,19 +196,18 @@ class Pid2PdfPlugin(Star):
             #发送作品信息
             pid = str(artwork_info["id"])
             title = artwork_info["title"]
-            views = artwork_info["total_view"]
-            bookmarks = artwork_info["total_bookmarks"]
-            # create_date = artwork_info["create_date"][:10]  # 只取日期部分
             is_ai = artwork_info.get("is_ai", False)
+            tags = artwork_info.get("tags", [])
             info_text = f"#PID: {pid}\n"
             info_text += f"标题: {title}\n"
-            # info_text += f"发布日期: {create_date}\n"
-            # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
+            is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in tags)
             if pages:
                 info_text += f"多图作品，共{len(pages)}张"
             if is_ai:
                 info_text += " | AI作品"
+            if is_r18_r18g:
+                info_text += " | R18/R18G作品"
             yield event.plain_result(info_text)
             # 发送图片
             async for result in self._send_img(event, img_path, pid):
@@ -242,7 +240,8 @@ class Pid2PdfPlugin(Star):
                         "meta_pages": artwork.meta_pages,
                         "total_view": artwork.total_view,
                         "total_bookmarks": artwork.total_bookmarks,
-                        "sanity_level": artwork.sanity_level
+                        "sanity_level": artwork.sanity_level,
+                        "tags": artwork.tags
                     }
                 else:
                     logger.info("尝试重新登录Pixiv")
@@ -514,6 +513,7 @@ class Pid2PdfPlugin(Star):
                         "total_view": illust.total_view,
                         "total_bookmarks": illust.total_bookmarks,
                         "sanity_level": illust.sanity_level,
+                        "tags": illust.tags,
                         "is_ai": is_ai
                     })
                     
@@ -698,9 +698,10 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                if r18_mode == "过滤 R18" and illust.sanity_level > self.max_sanity_level:
+                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in illust.tags)
+                if r18_mode == "过滤 R18" and is_r18_r18g:
                     continue
-                elif r18_mode == "仅 R18" and illust.sanity_level <= self.max_sanity_level:
+                elif r18_mode == "仅 R18" and not is_r18_r18g:
                     continue
                 
                 # AI作品过滤
@@ -722,6 +723,7 @@ class Pid2PdfPlugin(Star):
                     "total_view": illust.total_view,
                     "total_bookmarks": illust.total_bookmarks,
                     "sanity_level": illust.sanity_level,
+                    "tags": illust.tags,
                     # "create_date": illust.create_date,
                     "is_ai": is_ai
                 })
@@ -782,9 +784,10 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                if r18_mode == "过滤 R18" and illust.sanity_level > self.max_sanity_level:
+                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in illust.tags)
+                if r18_mode == "过滤 R18" and is_r18_r18g:
                     continue
-                elif r18_mode == "仅 R18" and illust.sanity_level <= self.max_sanity_level:
+                elif r18_mode == "仅 R18" and not is_r18_r18g:
                     continue
                 
                 # AI作品过滤
@@ -806,6 +809,7 @@ class Pid2PdfPlugin(Star):
                     "total_view": illust.total_view,
                     "total_bookmarks": illust.total_bookmarks,
                     "sanity_level": illust.sanity_level,
+                    "tags": illust.tags,
                     # "create_date": illust.create_date,
                     "is_ai": is_ai
                 })
@@ -830,17 +834,12 @@ class Pid2PdfPlugin(Star):
             for i, artwork in enumerate(works, 1):
                 pid = str(artwork["id"])
                 title = artwork["title"]
-                views = artwork["total_view"]
-                bookmarks = artwork["total_bookmarks"]
-                # create_date = artwork["create_date"][:10]  # 只取日期部分
                 is_ai = artwork.get("is_ai", False)
-                
                 # 构建作品信息
                 info_text = f"#{i} PID: {pid}\n"
                 info_text += f"标题: {title}\n"
-                # info_text += f"发布日期: {create_date}\n"
-                # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                 pages = artwork.get("meta_pages")
+                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in artwork["tags"])
                 if pages:
                     info_text += f"多图作品，共{len(pages)}张"
                 if is_ai:
@@ -976,15 +975,10 @@ class Pid2PdfPlugin(Star):
                         #发送作品信息
                         pid = str(artwork_info["id"])
                         title = artwork_info["title"]
-                        views = artwork_info["total_view"]
-                        bookmarks = artwork_info["total_bookmarks"]
-                        # create_date = artwork_info["create_date"][:10]  # 只取日期部分
                         is_ai = artwork_info.get("is_ai", False)
-                        is_r18 = artwork_info.get("sanity_level", 0) > self.max_sanity_level
+                        is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in artwork_info["tags"])
                         info_text = f"#PID: {pid}\n"
                         info_text += f"标题: {title}\n"
-                        # info_text += f"发布日期: {create_date}\n"
-                        # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                         pages = artwork_info.get("meta_pages")
                         if pages:
                             info_text += f"多图作品，共{len(pages)}张"
@@ -999,7 +993,7 @@ class Pid2PdfPlugin(Star):
                             logger.info(f"下载PID {pid} 的图片失败")
                         else:
                             img_msg_chain = MessageChain()
-                            if is_r18:
+                            if is_r18_r18g:
                                 # 生成PDF
                                 pdf_path = await self._create_pdf(image_paths, pid)
                                 if not pdf_path:
