@@ -14,6 +14,7 @@ class SubscriptionData(TypedDict):
 
     user_id: str
     last_updated_id: str
+    last_updated_time: int
     sub_groups: List[str]
 
 
@@ -57,7 +58,14 @@ class SubscriptionCenter:
                     content = await f.read()
                     if content.strip():
                         data = json.loads(content)
-                        self.subscriptions = data.get("subscriptions", [])
+                        self.subscriptions = []
+                        for sub in data.get("subscriptions", []):
+                            self.subscriptions.append(SubscriptionData(
+                                user_id=sub.get("user_id", ""),
+                                last_updated_id=sub.get("last_updated_id", "0"),
+                                last_updated_time=sub.get("last_updated_time", 0),
+                                sub_groups=sub.get("sub_groups", [])
+                            ))
                         logger.info(f"成功加载 {len(self.subscriptions)} 个订阅对象")
             else:
                 logger.info("订阅存储文件不存在，将创建新文件")
@@ -73,7 +81,7 @@ class SubscriptionCenter:
         try:
             data = {
                 "subscriptions": self.subscriptions,
-                "last_updated": datetime.now().isoformat(),
+                "last_updated": datetime.now().isoformat()
             }
             async with aiofiles.open(self.storage_file, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(data, indent=2, ensure_ascii=False))
@@ -103,7 +111,7 @@ class SubscriptionCenter:
                 if is_new_sub:
                     self.subscriptions.append(
                         SubscriptionData(
-                            user_id=sub_id, last_updated_id=0, sub_groups=[group_id]
+                            user_id=sub_id, last_updated_id=0, last_updated_time=0, sub_groups=[group_id]
                         )
                     )
                 logger.info(f"成功添加订阅对象: {sub_id}，群组：{group_id}")
@@ -280,6 +288,29 @@ class SubscriptionCenter:
             return False
         except Exception as e:
             logger.error(f"更新最后更新作品ID失败: {e}")
+            return False
+    async def renew_last_updated_time(self, sub_id: str) -> bool:
+        """
+        更新订阅对象的最后更新作品时间
+
+        Args:
+            sub_id: 订阅对象ID
+
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            async with self._lock:
+                for sub_data in self.subscriptions:
+                    if sub_data["user_id"] == sub_id:
+                        sub_data["last_updated_time"] = int(datetime.now().timestamp())
+                        logger.info(f"成功更新订阅对象 {sub_id} 的最后更新作品时间")
+                        await self._save_subscriptions()
+                        return True
+            logger.warning(f"未找到订阅对象 {sub_id}，无法更新最后更新作品时间")
+            return False
+        except Exception as e:
+            logger.error(f"更新最后更新作品时间失败: {e}")
             return False
         
     async def cleanup(self) -> None:

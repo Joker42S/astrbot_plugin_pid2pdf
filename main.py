@@ -933,11 +933,16 @@ class Pid2PdfPlugin(Star):
         logger.info("开始更新订阅")
         try:
             for sub_data in sub_data_list:
-                await asyncio.sleep(10)
                 user_id = sub_data["user_id"]
                 sub_groups = sub_data["sub_groups"]
                 last_updated_id = sub_data["last_updated_id"]
                 new_updated_id = int(last_updated_id)
+                last_updated_time = sub_data["last_updated_time"]
+                rand_update_interval =random.randint(86400, 172800)
+                if int(datetime.now().timestamp()) - int(last_updated_time) < rand_update_interval:
+                    # logger.info(f"画师 {user_id} 的上次作品更新距离现在不足{rand_update_interval//3600}小时，跳过本次更新")
+                    continue
+                await asyncio.sleep(10)
                 # 获取最新插图和漫画
                 for content_type in ["插画", "漫画"]:
                     artist_works = None
@@ -949,6 +954,7 @@ class Pid2PdfPlugin(Star):
                     if not artist_works:
                         logger.error(f"无法获取画师 {user_id} 的 {content_type} 作品信息")
                         continue
+                    await self.sub_center.renew_last_updated_time(user_id)
                     artist_name = artist_works["artist_name"]
                     works = artist_works["works"] or []
                     works.sort(key=lambda x: int(x["id"]), reverse=True)
