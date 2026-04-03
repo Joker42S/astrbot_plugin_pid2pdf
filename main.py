@@ -138,12 +138,15 @@ class Pid2PdfPlugin(Star):
             #发送作品信息
             pid = str(artwork_info["id"])
             title = artwork_info["title"]
+            author = artwork_info['user']['name']
+            author_id = artwork_info['user']['id']
             views = artwork_info["total_view"]
             bookmarks = artwork_info["total_bookmarks"]
             # create_date = artwork_info["create_date"][:10]  # 只取日期部分
             is_ai = artwork_info.get("is_ai", False)
             info_text = f"#PID: {pid}\n"
             info_text += f"标题: {title}\n"
+            info_text += f"作者: {author}({author_id})\n"
             # info_text += f"发布日期: {create_date}\n"
             # info_text += f"浏览: {views} | 收藏: {bookmarks}"
             pages = artwork_info.get("meta_pages")
@@ -196,10 +199,13 @@ class Pid2PdfPlugin(Star):
             #发送作品信息
             pid = str(artwork_info["id"])
             title = artwork_info["title"]
+            author = artwork_info['user']['name']
+            author_id = artwork_info['user']['id']
             is_ai = artwork_info.get("is_ai", False)
             tags = artwork_info.get("tags", [])
             info_text = f"#PID: {pid}\n"
             info_text += f"标题: {title}\n"
+            info_text += f"作者: {author}({author_id})\n"
             pages = artwork_info.get("meta_pages")
             is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in tags)
             if pages:
@@ -539,6 +545,7 @@ class Pid2PdfPlugin(Star):
                 pid = str(artwork["id"])
                 title = artwork["title"]
                 author = artwork["user"]["name"]
+                author_id = artwork['user']['id']
                 views = artwork["total_view"]
                 bookmarks = artwork["total_bookmarks"]
                 is_ai = artwork.get("is_ai", False)
@@ -546,7 +553,7 @@ class Pid2PdfPlugin(Star):
                 # 构建作品信息
                 info_text = f"#{i} PID: {pid}\n"
                 info_text += f"标题: {title}\n"
-                info_text += f"作者: {author}\n"
+                info_text += f"作者: {author}({author_id})\n"
                 # info_text += f"浏览: {views} | 收藏: {bookmarks}"
                 pages = artwork.get("meta_pages")
                 if pages:
