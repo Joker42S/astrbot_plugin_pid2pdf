@@ -231,9 +231,15 @@ class Pid2PdfPlugin(Star):
                 return None
 
             # 获取作品详情
+            error_info = ''
             for i in range(3):
-                result = self.papi.illust_detail(pid)
-                if result.illust:
+                try:
+                    result = self.papi.illust_detail(pid)
+                except Exception as e:
+                    logger.error(f"获取作品详情失败: {e}")
+                    error_info = e
+                    result = None
+                if result and result.illust:
                     artwork = result.illust
                     return {
                         "id": artwork.id,
@@ -255,7 +261,7 @@ class Pid2PdfPlugin(Star):
                     await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"获取作品信息失败: {e}")
-        logger.info(f"未找到PID {pid} 的作品")
+        logger.info(f"未找到PID {pid} 的作品,错误信息{error_info}")
         return None
 
     async def _download_images(self, artwork_info: dict, pid, max_num = 0) -> List[Path]:
@@ -485,15 +491,21 @@ class Pid2PdfPlugin(Star):
                 return None
             
             # 获取排行榜
+            error_info = ''
             for i in range(3):
-                result = self.papi.illust_ranking(mode=mode, date=date)
-                if result.illusts:
+                try:
+                    result = self.papi.illust_ranking(mode=mode, date=date)
+                except Exception as e:
+                    logger.error(f"获取排行榜数据失败: {e}")
+                    error_info = e
+                    result = None
+                if result and result.illusts:
                     break
                 else:
                     logger.info("尝试重新登录Pixiv")
                     self.papi.auth(refresh_token=self.refresh_token)
                     await asyncio.sleep(1)
-            if result.illusts:
+            if result and result.illusts:
                 # 应用AI过滤设置
                 ai_filter_mode = self.config.get("ai_filter_mode", "显示 AI 作品")
                 filtered_illusts = []
@@ -528,7 +540,7 @@ class Pid2PdfPlugin(Star):
                 
                 return filtered_illusts[:count]
             else:
-                logger.error("排行榜数据为空")
+                logger.error(f"排行榜数据为空,错误信息：{error_info}")
                 return None
                 
         except Exception as e:
@@ -670,14 +682,21 @@ class Pid2PdfPlugin(Star):
                 return None
             
             # 获取画师信息
+            error_info = ''
             for i in range(3):
-                user_detail = self.papi.user_detail(uid)
-                if user_detail.user:
+                try:
+                    user_detail = self.papi.user_detail(uid)
+                except Exception as e:
+                    logger.error(f"获取画师信息失败: {e}")
+                    error_info = e
+                if user_detail and user_detail.user:
                     break
                 else:
                     logger.info("尝试重新登录Pixiv")
                     self.papi.auth(refresh_token=self.refresh_token)
                     await asyncio.sleep(1)
+            if not user_detail:
+                logger.error(f"获取画师信息失败，错误信息：{error_info}")
             if not user_detail.user:
                 logger.error(f"未找到画师 {uid}")
                 return None
