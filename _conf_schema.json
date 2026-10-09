@@ -73,6 +73,12 @@
       "hint": "限制单次更新时最多更新多少个作者的作品，防止消息过多",
       "default": 10
   },
+  "max_cache_size": {
+      "description": "最大缓存大小",
+      "type": "int",
+      "hint": "单位 MB。temp 图片与 persistent PDF 的总和超过此值后会后台自动清理，优先删除 PDF（PDF 可由本地图片重新打包，无须重新下载）。设为 0 表示不限制。",
+      "default": 1024
+  },
   "easter_egg_list": {
       "description": "随机彩蛋范围",
       "type": "list",

@@ -4,8 +4,12 @@ from pathlib import Path
 import aiohttp
 import aiofiles
 import asyncio
+import contextlib
+import os
 import re
 import random
+import threading
+import time
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
@@ -279,7 +283,192 @@ def _is_partial(artwork: dict, image_paths: list) -> bool:
     return bool(total) and len(image_paths) < total
 
 
-@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.5")
+# ---------------------------------------------------------------------------
+# 缓存清理
+# ---------------------------------------------------------------------------
+# 缓存 = temp/ 下按 PID 分的图片目录 + persistent/ 下的 PDF。
+# persistent/ 里的 subscriptions.json、egg_trigger_record.txt 是插件状态而不是
+# 缓存，永远不会被清理，所以下面按后缀白名单删除，不做整体删除。
+
+# 清理到预算的这个比例为止，留出余量，避免刚清完又被下一次下载顶上去
+CACHE_LOW_WATER = 0.9
+# 写入这么多字节的缓存后，主动唤醒一次清理检查
+CACHE_TRIGGER_BYTES = 64 * 1024 * 1024
+# 即使没有写入，也至少隔这么久检查一次
+CACHE_CHECK_INTERVAL_SECONDS = 300
+# 比这更新的文件/目录不参与清理：正在下载的图片、刚打包好还没发出去的 PDF
+# 都落在窗口内，避免删掉正在使用的文件
+CACHE_MIN_AGE_SECONDS = 600
+
+
+def _file_size(path: Path) -> int:
+    """单个文件的字节数，取不到就当 0。"""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _touch(path: Path) -> None:
+    """把 mtime 刷成当前时间。
+
+    缓存清理只动「至少 CACHE_MIN_AGE_SECONDS 没被碰过」的文件/目录，所以
+    但凡刚用过（正在发给平台）的缓存都刷一下 mtime，等价于 LRU：越常用的
+    越不会被清掉。
+    """
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def _dir_size(directory: Path) -> int:
+    """目录（递归）占用字节数，读不到的条目跳过。"""
+    total = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                    elif entry.is_dir(follow_symlinks=False):
+                        total += _dir_size(Path(entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
+
+
+def _collect_cache_entries(
+    temp_dir: Path,
+    persistent_dir: Path,
+    busy: set,
+    min_age_seconds: int,
+) -> tuple:
+    """列出可清理的缓存条目。
+
+    返回 (pdfs, temp_dirs, cache_bytes)：
+      pdfs      - [(mtime, 路径, 大小)]，persistent/ 下除状态文件外的 PDF
+      temp_dirs - [(mtime, 路径, 大小)]，temp/ 下的作品图片目录
+      cache_bytes - 两者合计占用
+    """
+    now = time.time()
+    busy = busy or set()
+
+    pdfs = []
+    if persistent_dir and persistent_dir.is_dir():
+        for entry in persistent_dir.glob("*.pdf"):
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            if entry.stem in busy:
+                continue
+            if now - stat.st_mtime < min_age_seconds:
+                continue
+            pdfs.append((stat.st_mtime, entry, stat.st_size))
+
+    temp_dirs = []
+    if temp_dir and temp_dir.is_dir():
+        try:
+            entries = list(os.scandir(temp_dir))
+        except OSError:
+            entries = []
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                if entry.name in busy:
+                    continue
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            if now - mtime < min_age_seconds:
+                continue
+            temp_dirs.append((mtime, Path(entry.path), _dir_size(Path(entry.path))))
+
+    # 按最旧的优先清理
+    pdfs.sort(key=lambda item: item[0])
+    temp_dirs.sort(key=lambda item: item[0])
+    cache_bytes = sum(item[2] for item in pdfs) + sum(item[2] for item in temp_dirs)
+    return pdfs, temp_dirs, cache_bytes
+
+
+def _cleanup_cache_sync(
+    temp_dir: Path,
+    persistent_dir: Path,
+    max_bytes: int,
+    busy: set,
+    min_age_seconds: int = CACHE_MIN_AGE_SECONDS,
+) -> dict:
+    """按策略清理缓存。同步阻塞，必须放到线程里调用。
+
+    顺序遵循「PDF 优先」：PDF 是由 temp/ 里的图片打包出来的，删掉之后
+    本地图片还在，下次 /pid2pdf 只要重新打包即可，不用重新下载。
+    只有在 PDF 全删完仍然超标时，才会去删 temp/ 里的图片目录。
+    """
+    stats = {
+        "checked": 0,
+        "freed": 0,
+        "deleted_pdfs": 0,
+        "deleted_dirs": 0,
+        "skipped_busy": len(busy or ()),
+    }
+    if max_bytes <= 0:
+        return stats
+
+    pdfs, temp_dirs, cache_bytes = _collect_cache_entries(
+        temp_dir, persistent_dir, busy, min_age_seconds
+    )
+    stats["checked"] = cache_bytes
+    if cache_bytes <= max_bytes:
+        return stats
+
+    target = int(max_bytes * CACHE_LOW_WATER)
+    remaining = cache_bytes
+
+    def _delete_pdf(path: Path, size: int) -> None:
+        nonlocal remaining
+        try:
+            path.unlink()
+        except OSError as e:
+            logger.warning(f"删除缓存 PDF 失败 {path.name}: {e}")
+            return
+        remaining -= size
+        stats["freed"] += size
+        stats["deleted_pdfs"] += 1
+
+    def _delete_dir(path: Path, size: int) -> None:
+        nonlocal remaining
+        try:
+            for child in path.iterdir():
+                if child.is_file():
+                    child.unlink(missing_ok=True)
+            path.rmdir()
+        except OSError as e:
+            logger.warning(f"删除缓存图片目录失败 {path.name}: {e}")
+            return
+        remaining -= size
+        stats["freed"] += size
+        stats["deleted_dirs"] += 1
+
+    # 第一轮：删 PDF
+    for _mtime, path, size in pdfs:
+        if remaining <= target:
+            break
+        _delete_pdf(path, size)
+
+    # 第二轮：PDF 删完还不够，才动 temp/ 的图片
+    for _mtime, path, size in temp_dirs:
+        if remaining <= target:
+            break
+        _delete_dir(path, size)
+
+    return stats
+
+
+@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.6")
 class Pid2PdfPlugin(Star):
     def __init__(self, context: Context, config : dict):
         super().__init__(context)
@@ -305,6 +494,16 @@ class Pid2PdfPlugin(Star):
         self.max_update_limit = 10
         self.egg_trigger_time = 0
         self.egg_trigger_record_file = None
+        # 缓存清理相关。max_cache_size 单位 MB，<=0 表示不限制。
+        self.max_cache_size = 1024
+        self._cache_task = None
+        self._cache_wakeup = asyncio.Event()
+        self._cache_bytes_since_check = 0
+        # 正在被处理、不能清理的标识（temp/ 下按 PID 命名的目录名，
+        # 以及 persistent/ 下 PDF 的文件名主干）。会从事件循环线程写入、
+        # 从清理线程读取，所以用 threading.Lock 保护。
+        self._busy_keys: set = set()
+        self._busy_lock = threading.Lock()
 
     async def initialize(self):
         """插件初始化方法"""
@@ -321,6 +520,8 @@ class Pid2PdfPlugin(Star):
             self.enable_subscription = _as_bool(self.config.get("enable_subscription", False))
             # 注意：schema 里的键名是 max_update_limit，不是 update_limit
             self.max_update_limit = max(1, _as_int(self.config.get("max_update_limit", 10), 10))
+            # 缓存上限，单位 MB，0 表示不限制
+            self.max_cache_size = max(0, _as_int(self.config.get("max_cache_size", 1024), 1024))
 
             # 设置代理（如果配置了）
             _REQUESTS_KWARGS: dict[str, Any] = {
@@ -368,10 +569,109 @@ class Pid2PdfPlugin(Star):
             if self.enable_subscription:
                 self.sub_center.set_callback(self._handle_sub_update)
                 self.sub_center.start_timer()
-            logger.info(f"Pid2Pdf插件初始化完成，临时目录: {self.temp_dir}")
+
+            # 启动后台缓存清理。AstrBot 官方建议后台任务在 initialize() 里起，
+            # Context.register_task 已弃用。这里不 await，避免拖慢插件加载。
+            self._start_cache_cleanup()
+            logger.info(
+                f"Pid2Pdf插件初始化完成，临时目录: {self.temp_dir}，"
+                f"缓存上限: {'不限制' if self.max_cache_size <= 0 else f'{self.max_cache_size}MB'}"
+            )
             
         except Exception as e:
             logger.error(f"Pid2Pdf插件初始化失败: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 缓存清理
+    # ------------------------------------------------------------------
+    def _start_cache_cleanup(self) -> None:
+        """启动后台清理循环。重复调用是安全的。"""
+        if self.max_cache_size <= 0:
+            logger.info("未设置缓存上限，跳过缓存清理任务")
+            return
+        if self._cache_task is not None and not self._cache_task.done():
+            return
+        self._cache_wakeup.set()  # 启动后立刻检查一次，可能上次退出时就已经超标
+        self._cache_task = asyncio.create_task(self._cache_cleanup_loop())
+        logger.info(f"缓存清理任务已启动，上限 {self.max_cache_size}MB")
+
+    @contextlib.contextmanager
+    def _busy(self, *keys: str):
+        """把这些标识标记为「正在使用」，清理时跳过。
+
+        同步上下文管理器：事件循环线程和清理线程都会碰 _busy_keys，用锁保护。
+        """
+        keys = tuple(k for k in keys if k)
+        with self._busy_lock:
+            self._busy_keys.update(keys)
+        try:
+            yield
+        finally:
+            with self._busy_lock:
+                self._busy_keys.difference_update(keys)
+
+    def _busy_snapshot(self) -> set:
+        with self._busy_lock:
+            return set(self._busy_keys)
+
+    def _note_cache_growth(self, num_bytes: int) -> None:
+        """记录新写入的缓存字节数。
+
+        只做累加和 set()，不碰磁盘，所以可以从消息处理路径里直接调用，
+        不会阻塞处理消息。
+        """
+        if self.max_cache_size <= 0 or not num_bytes or num_bytes <= 0:
+            return
+        self._cache_bytes_since_check += num_bytes
+        if self._cache_bytes_since_check >= CACHE_TRIGGER_BYTES:
+            self._cache_bytes_since_check = 0
+            self._cache_wakeup.set()
+
+    async def _cache_cleanup_if_needed(self) -> dict:
+        """检查并按需清理一次缓存。磁盘操作全部在线程里，不阻塞事件循环。"""
+        if self.max_cache_size <= 0 or not self.temp_dir or not self.persistent_dir:
+            return {}
+        return await asyncio.to_thread(
+            _cleanup_cache_sync,
+            self.temp_dir,
+            self.persistent_dir,
+            self.max_cache_size * 1024 * 1024,
+            self._busy_snapshot(),
+            CACHE_MIN_AGE_SECONDS,
+        )
+
+    async def _cache_cleanup_loop(self) -> None:
+        """后台循环：被 _note_cache_growth 唤醒，或每 CACHE_CHECK_INTERVAL_SECONDS 兜底一次。"""
+        logger.info("缓存清理循环开始运行")
+        try:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        self._cache_wakeup.wait(), timeout=CACHE_CHECK_INTERVAL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    pass
+
+                # 清掉 Event 时可能又有新的写入请求，所以先 clear，再检查，
+                # 检查期间新来的 set() 会留到下一轮，不会丢。
+                self._cache_wakeup.clear()
+                try:
+                    stats = await self._cache_cleanup_if_needed()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"缓存清理执行失败: {e}", exc_info=True)
+                    continue
+
+                if stats and stats.get("freed"):
+                    logger.info(
+                        f"缓存清理完成：原有 {stats['checked'] / 1024 / 1024:.1f}MB，"
+                        f"释放 {stats['freed'] / 1024 / 1024:.1f}MB，"
+                        f"删除 PDF {stats['deleted_pdfs']} 个、图片目录 {stats['deleted_dirs']} 个"
+                    )
+        except asyncio.CancelledError:
+            logger.info("缓存清理循环已停止")
+            raise
 
     @filter.command("pid2pdf")
     async def pid_to_pdf(self, event: AstrMessageEvent):
@@ -550,23 +850,28 @@ class Pid2PdfPlugin(Star):
             temp_download_dir = self.temp_dir / f"{pid}"
             if not temp_download_dir.exists():
                 temp_download_dir.mkdir(parents=True, exist_ok=True)
-            if artwork_info.get("meta_single_page"):
-                # 单图作品
-                url = artwork_info["meta_single_page"]["original_image_url"]
-                path = await self._download_single_image(url, 0, pid)
-                if path:
-                    image_paths.append(path)
-            elif artwork_info.get("meta_pages"):
-                # 多图作品
-                download_num = 0
-                for i, page in enumerate(artwork_info["meta_pages"]):
-                    url = page["image_urls"]["original"]
-                    path = await self._download_single_image(url, i, pid)
+            # 整个下载期间把这件作品标记为「正在使用」，
+            # 避免缓存清理把它所在的 temp 目录删掉
+            with self._busy(str(pid)):
+                if artwork_info.get("meta_single_page"):
+                    # 单图作品
+                    url = artwork_info["meta_single_page"]["original_image_url"]
+                    path = await self._download_single_image(url, 0, pid)
                     if path:
                         image_paths.append(path)
-                        download_num += 1
-                    if max_num > 0 and download_num >= max_num:
-                        break
+                elif artwork_info.get("meta_pages"):
+                    # 多图作品
+                    download_num = 0
+                    for i, page in enumerate(artwork_info["meta_pages"]):
+                        url = page["image_urls"]["original"]
+                        path = await self._download_single_image(url, i, pid)
+                        if path:
+                            image_paths.append(path)
+                            download_num += 1
+                        if max_num > 0 and download_num >= max_num:
+                            break
+            # 刚用过这件作品的图片，刷新目录 mtime，清理时优先保留
+            _touch(self.temp_dir / str(pid))
             # logger.info(f"下载了 {len(image_paths)} 张图片")
             return image_paths
             
@@ -619,6 +924,8 @@ class Pid2PdfPlugin(Star):
                             img_data = await asyncio.to_thread(_image_obfus, img_data)
                         async with aiofiles.open(file_path, 'wb') as f:
                             await f.write(img_data)
+                        # 新增的缓存字节数；累计够了才唤醒后台清理
+                        self._note_cache_growth(len(img_data))
                         
                         # logger.info(f"下载图片 {index}: {file_path}")
                         return file_path
@@ -644,11 +951,21 @@ class Pid2PdfPlugin(Star):
 
             # img2pdf.convert 和写盘都是同步阻塞操作，多图作品会卡住整个
             # AstrBot 事件循环，这里丢到线程里执行。
-            def _write_pdf() -> None:
+            def _write_pdf() -> int:
+                data = img2pdf.convert(image_paths)
                 with open(pdf_path, 'wb') as f:
-                    f.write(img2pdf.convert(image_paths))
+                    f.write(data)
+                return len(data)
 
-            await asyncio.to_thread(_write_pdf)
+            # 打包期间把这些图片所在的 temp 目录标记为「正在使用」。
+            # 注意要按图片路径的父目录名标记：排行榜汇总 PDF 会同时读多个
+            # 不同 PID 的目录，只标记 pdf_name 是不够的。
+            # image_paths 里可能是 Path 也可能是 str（排行榜传的是字符串），
+            # 统一用 Path() 包一层。
+            busy_keys = {Path(p).parent.name for p in image_paths} | {pdf_path.stem}
+            with self._busy(*busy_keys):
+                written = await asyncio.to_thread(_write_pdf)
+            self._note_cache_growth(written or 0)
             # logger.info(f"生成PDF: {pdf_path}")
             return pdf_path
             
@@ -660,8 +977,13 @@ class Pid2PdfPlugin(Star):
         """发送PDF文件给用户"""
         try:
             if pdf_path.exists():
-                # 发送文件
-                yield event.chain_result([File(file=str(pdf_path),name=f"{pid}.pdf")])
+                # 发送文件。
+                # 平台是在 handler 返回之后才真正去读这个文件的，所以除了
+                # _busy（覆盖本函数执行期间）之外，还要把 mtime 刷成现在，
+                # 让清理的 CACHE_MIN_AGE_SECONDS 窗口把这次发送也罩住。
+                with self._busy(pdf_path.stem):
+                    yield event.chain_result([File(file=str(pdf_path),name=f"{pid}.pdf")])
+                _touch(pdf_path)
                 # logger.info(f"PDF文件已生成并发送: {pid}.pdf")
             else:
                 yield event.plain_result("PDF文发送失败")
@@ -679,28 +1001,32 @@ class Pid2PdfPlugin(Star):
                 yield event.plain_result("图片发送失败")
                 return
 
-            # 每条消息链最多 10 个组件，超出就分页发送
-            chains: List[list] = []
-            chain: list = [Plain(f'PID：{pid}')]
-            for img in imgs:
-                if len(chain) >= 10:
+            # 发送期间标记为「正在使用」，避免清理把正在读的图片删掉
+            with self._busy(img_path.name):
+                # 每条消息链最多 10 个组件，超出就分页发送
+                chains: List[list] = []
+                chain: list = [Plain(f'PID：{pid}')]
+                for img in imgs:
+                    if len(chain) >= 10:
+                        chains.append(chain)
+                        chain = []
+                    chain.append(Image.fromFileSystem(str(img.absolute())))
+                if chain:
                     chains.append(chain)
-                    chain = []
-                chain.append(Image.fromFileSystem(str(img.absolute())))
-            if chain:
-                chains.append(chain)
 
-            if fake_record:
-                for one_chain in chains:
-                    node = Node(
-                            uin=event.get_self_id(),
-                            name="AstrBot",
-                            content=one_chain
-                        )
-                    yield event.chain_result([node])
-            else:
-                for one_chain in chains:
-                    yield event.chain_result(one_chain)
+                if fake_record:
+                    for one_chain in chains:
+                        node = Node(
+                                uin=event.get_self_id(),
+                                name="AstrBot",
+                                content=one_chain
+                            )
+                        yield event.chain_result([node])
+                else:
+                    for one_chain in chains:
+                        yield event.chain_result(one_chain)
+            # 同上：平台稍后才读这些图片，刷新 mtime 让清理窗口罩住这次发送
+            _touch(img_path)
             # logger.info(f"图片已送: {pid}")
             yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
             
@@ -709,18 +1035,38 @@ class Pid2PdfPlugin(Star):
             yield event.plain_result(f"发送图片失败: {str(e)}")
 
 
-    async def _cleanup_temp_files(self):
-        """清理临时文件
+    def _cache_usage_bytes(self) -> int:
+        """当前缓存占用（temp 图片 + persistent PDF）。同步，需在线程里调用。"""
+        return _dir_size(self.temp_dir) + _dir_size(self.persistent_dir)
 
-        清理策略尚未实现（见 README 计划功能）。这里刻意保留 temp/ 缓存，
-        因为 _download_single_image 会靠它跳过重复下载。
+    @filter.command("清理缓存")
+    async def clean_cache(self, event: AstrMessageEvent):
+        """立即按策略清理一次缓存，并报告释放了多少空间
+
+        主要用于不想等后台任务、想手动腾地方的情况。
         """
-        try:
-            if self.temp_dir and self.temp_dir.exists():
-                # TODO: 按策略（大小/时间）清理，目前只保留缓存
-                logger.debug("临时文件清理策略尚未实现，保留 temp/ 缓存")
-        except Exception as e:
-            logger.error(f"清理临时文件失败: {e}")
+        if self.max_cache_size <= 0:
+            yield event.plain_result("未设置缓存上限（max_cache_size=0），不会自动清理。")
+            return
+        if not self.temp_dir or not self.persistent_dir:
+            yield event.plain_result("插件尚未初始化完成，暂时无法清理缓存。")
+            return
+
+        before = await asyncio.to_thread(self._cache_usage_bytes)
+        stats = await self._cache_cleanup_if_needed()
+        after = await asyncio.to_thread(self._cache_usage_bytes)
+        limit_mb = self.max_cache_size
+        if stats.get("freed"):
+            yield event.plain_result(
+                f"缓存清理完成\n"
+                f"清理前: {before / 1024 / 1024:.1f}MB\n"
+                f"清理后: {after / 1024 / 1024:.1f}MB（上限 {limit_mb}MB）\n"
+                f"删除 PDF {stats['deleted_pdfs']} 个、图片目录 {stats['deleted_dirs']} 个"
+            )
+        else:
+            yield event.plain_result(
+                f"当前缓存 {before / 1024 / 1024:.1f}MB，未超过上限 {limit_mb}MB，无需清理。"
+            )
 
     @filter.command("pixiv_ranking")
     async def pixiv_ranking(self, event: AstrMessageEvent):
@@ -1467,6 +1813,7 @@ Pid2Pdf 插件使用说明：
 /订阅画师 <UID> - 订阅画师的最新作品（订阅后立刻拉一次最新作品）
 /删除订阅 <UID> - 取消订阅
 /刷新订阅 - 立即刷新一次订阅
+/清理缓存 - 立即按上限清理一次缓存
 /pid_config - 查看当前配置状态
 
 排行榜类型：
@@ -1496,6 +1843,13 @@ https://www.pixiv.net/users/12345678      -> 等同于 /订阅画师 12345678
     @filter.command("pid_config")
     async def config_command(self, event: AstrMessageEvent):
         """显示当前配置状态"""
+        cache_info = "未设置上限"
+        if self.max_cache_size > 0 and self.temp_dir and self.persistent_dir:
+            try:
+                used = await asyncio.to_thread(self._cache_usage_bytes)
+                cache_info = f"{used / 1024 / 1024:.1f}MB / {self.max_cache_size}MB"
+            except Exception as e:
+                cache_info = f"读取失败({e})"
         config_info = f"""
 Pid2Pdf 插件配置状态：
 
@@ -1504,16 +1858,24 @@ Pixiv API状态: {'已登录' if self.papi and self.refresh_token else '未配�
 订阅功能: {'已启用' if self.enable_subscription else '未启用'}
 R18 过滤: {self.config.get('r18_mode', '过滤 R18')}
 AI 作品过滤: {self.config.get('ai_filter_mode', '显示 AI 作品')}
+缓存占用: {cache_info}
 
 如需配置，请在插件配置文件中设置：
 - refresh_token: 您的Pixiv refresh_token
 - proxy: 代理服务器地址（可选）
+- max_cache_size: 缓存上限（MB，0 表示不限制）
         """
         yield event.plain_result(config_info.strip())
 
     async def terminate(self):
         """插件销毁方法"""
-        await self._cleanup_temp_files()
+        # 先停掉后台清理循环，避免它在我们清理资源时还在动文件
+        task = self._cache_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._cache_task = None
         # initialize() 可能中途失败导致 sub_center 未创建，这里不能无条件访问
         if self.sub_center is not None:
             await self.sub_center.cleanup()

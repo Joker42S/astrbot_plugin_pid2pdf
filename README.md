@@ -20,10 +20,10 @@
 - [x] 作品信息（标题/作者/标签/R18/AI）在图片或 PDF 之前发出
 - [x] 未打包全的 PDF 以 `_preview` 命名，不会污染 `/pid2pdf` 的完整版缓存
 - [x] 多图作品按页码顺序发送
+- [x] 缓存上限与后台自动清理（优先清理 PDF）
 
 
 ## 🚧 计划功能
-- [ ] 按策略清理临时文件
 - [ ] 搜索功能
 - [ ] 指定 tag 过滤
 - [ ] 监听 Pixiv 镜像站的链接分享
@@ -84,7 +84,10 @@ git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 # 立即刷新一次全部订阅
 /刷新订阅
 
-# 查看当前配置状态
+# 立即按上限清理一次缓存
+/清理缓存
+
+# 查看当前配置状态（含缓存占用）
 /pid_config
 
 # 查看帮助信息
@@ -175,7 +178,33 @@ https://www.pixiv.net/users/54891433       #等同于 /订阅画师 54891433
 
 ## ⚙️ 配置说明
 
-施工中
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `refresh_token` | string | 空 | Pixiv refresh_token，必填 |
+| `proxy` | string | 空 | 网络代理地址 |
+| `use_reverse_proxy` | bool | false | 是否用反代下载图片 |
+| `reverse_proxy` | string | 空 | 反代地址 |
+| `r18_mode` | string | 过滤 R18 | `过滤 R18` / `允许 R18` / `仅 R18` |
+| `ai_filter_mode` | string | 显示 AI 作品 | `显示 AI 作品` / `过滤 AI 作品` / `仅 AI 作品` |
+| `easter_egg` | bool | false | 随机彩蛋开关 |
+| `enable_subscription` | bool | false | 是否启用订阅 |
+| `refresh_interval` | int | 90 | 订阅刷新间隔（分钟） |
+| `max_update_limit` | int | 10 | 单次更新最多处理多少个画师 |
+| `max_cache_size` | int | 1024 | 缓存上限（**MB**），`0` 表示不限制 |
+| `easter_egg_list` | list | 4 项 | 彩蛋可选的排行榜 |
+
+### 缓存清理
+
+`temp/` 里的图片和 `persistent/` 里的 PDF 合计超过 `max_cache_size` 后会后台自动清理：
+
+- **优先删 PDF**。PDF 是由 `temp/` 里的图片打包出来的，删掉之后本地图片还在，
+  下次 `/pid2pdf` 只要重新打包即可，不需要重新下载；只有 PDF 全删完仍然超标时，
+  才会去删 `temp/` 里的图片目录。
+- 两者都按**最旧优先**清理，并且一次清到上限的 90%，避免刚清完又被顶上去反复触发。
+- `subscriptions.json`、`egg_trigger_record.txt` 是插件状态而不是缓存，**永远不会被删**。
+- 清理跑在后台线程里，不阻塞处理消息；正在下载的作品、刚打包好还没发出去的 PDF
+  都会被跳过（10 分钟内碰过的缓存一律不动，等价于 LRU）。
+- 想手动腾地方就发 `/清理缓存`，`/pid_config` 可以看到当前占用。
 
 ## 📂 文件结构
 
@@ -194,7 +223,8 @@ https://www.pixiv.net/users/54891433       #等同于 /订阅画师 54891433
   - `pixiv_<PID>.pdf` - `/pid2pdf` 生成的**完整**作品 PDF，再次请求同一 PID 时直接复用
   - `pixiv_<PID>_preview.pdf` - 订阅 / 排行榜等场景只拿到部分页数时的**预览版** PDF
   - `pixiv_<排行榜模式>_<日期>_preview.pdf` - 排行榜汇总 PDF（每个作品只取第一张）
-  - `subscriptions.json` - 订阅记录
+  - `subscriptions.json` - 订阅记录（插件状态，不参与清理）
+  - `egg_trigger_record.txt` - 彩蛋触发时间（插件状态，不参与清理）
 
 > 预览版文件名带 `_preview` 后缀，所以 `/pid2pdf` 的缓存查找（只看 `pixiv_<PID>.pdf`）
 > 不会误命中一份只有前 10 张的 PDF。想强制重新生成完整版时，删掉对应的
