@@ -14,14 +14,19 @@
 - [x] 配置代理
 - [x] 使用国内直连反代下载图片
 - [x] 订阅功能
+- [x] 订阅后立即拉取一次最新作品，并把最新作品 PID 记入订阅记录
+- [x] 发送 Pixiv 作品链接自动走 `/pid`
+- [x] 发送 Pixiv 画师链接自动走 `/订阅画师`
+- [x] 作品信息（标题/作者/标签/R18/AI）在图片或 PDF 之前发出
+- [x] 未打包全的 PDF 以 `_preview` 命名，不会污染 `/pid2pdf` 的完整版缓存
+- [x] 多图作品按页码顺序发送
 
 
 ## 🚧 计划功能
 - [ ] 按策略清理临时文件
-- [ ] 丰富回复信息
 - [ ] 搜索功能
-- [ ] 监听Pixiv或其他镜像站的链接分享
 - [ ] 指定 tag 过滤
+- [ ] 监听 Pixiv 镜像站的链接分享
 
 ## 📦 环境要求
 - 安装AstrBot
@@ -70,6 +75,18 @@ git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 # 获取指定数量的画师作品
 /puid 12345678 3
 
+# 订阅画师（订阅成功后会立刻拉取一次最新作品并发送）
+/订阅画师 12345678
+
+# 取消订阅
+/删除订阅 12345678
+
+# 立即刷新一次全部订阅
+/刷新订阅
+
+# 查看当前配置状态
+/pid_config
+
 # 查看帮助信息
 /pid_help
 
@@ -79,7 +96,18 @@ git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 今日ai色图    #获取 day_r18_ai 排行榜
 今日ai图    #获取 day_ai 排行榜
 
+# 直接发 Pixiv 链接（群里发即可，无需命令前缀）
+https://www.pixiv.net/artworks/147446028   #等同于 /pid 147446028
+https://www.pixiv.net/users/54891433       #等同于 /订阅画师 54891433
+
 ```
+
+> 链接识别支持 `artworks/`、`i/`、`member_illust.php?illust_id=` 三种作品链接形式，
+> 以及 `users/` 画师链接；带语言前缀（`/en/`、`/zh-tw/`）也能识别。
+> 目前仅在**群聊**生效（与简易命令一致），私聊暂不触发。
+>
+> `/pid`、`/pid2pdf`、`/订阅画师` 的参数同样可以直接填链接，例如
+> `/pid https://www.pixiv.net/artworks/147446028`；这类指令写法不会被链接识别重复处理。
 
 ### 排行榜类型说明
 
@@ -161,8 +189,16 @@ git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 
 位于 `AstrBot/data/plugin_data/pid2pdf/`:
 
-- `temp/` - 下载的临时图片目录
+- `temp/<PID>/` - 下载的原始图片缓存（按页码命名 `image_0.jpg`、`image_1.jpg` ...）
 - `persistent/` - 生成的 PDF 文件目录
+  - `pixiv_<PID>.pdf` - `/pid2pdf` 生成的**完整**作品 PDF，再次请求同一 PID 时直接复用
+  - `pixiv_<PID>_preview.pdf` - 订阅 / 排行榜等场景只拿到部分页数时的**预览版** PDF
+  - `pixiv_<排行榜模式>_<日期>_preview.pdf` - 排行榜汇总 PDF（每个作品只取第一张）
+  - `subscriptions.json` - 订阅记录
+
+> 预览版文件名带 `_preview` 后缀，所以 `/pid2pdf` 的缓存查找（只看 `pixiv_<PID>.pdf`）
+> 不会误命中一份只有前 10 张的 PDF。想强制重新生成完整版时，删掉对应的
+> `pixiv_<PID>.pdf` 即可。
 
 ## 📄 许可证
 

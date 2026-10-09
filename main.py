@@ -114,7 +114,168 @@ def _is_ai_illust(illust: Any) -> bool:
     return getattr(illust, "illust_ai_type", None) == 2
 
 
-@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.3")
+# 群里直接发这几个词就能触发的简易命令 -> 对应的排行榜模式
+SIMPLE_COMMAND_MODES = {
+    "今日色图": "day_r18",
+    "今日ai色图": "day_r18_ai",
+    "今日排行榜": "day_male",
+    "今日ai图": "day_ai",
+}
+
+# Pixiv 链接识别。允许省略协议头，也允许带语言前缀（/en/、/zh-tw/）。
+_PIXIV_LANG_PREFIX = r"(?:[a-z]{2}(?:-[a-z]{2})?/)?"
+PIXIV_ARTWORK_PATTERNS = (
+    re.compile(rf"pixiv\.net/{_PIXIV_LANG_PREFIX}artworks/(\d+)", re.IGNORECASE),
+    re.compile(rf"pixiv\.net/{_PIXIV_LANG_PREFIX}i/(\d+)", re.IGNORECASE),
+    re.compile(
+        r"pixiv\.net/member_illust\.php\?[^\s]*?illust_id=(\d+)", re.IGNORECASE
+    ),
+)
+PIXIV_USER_RE = re.compile(rf"pixiv\.net/{_PIXIV_LANG_PREFIX}users/(\d+)", re.IGNORECASE)
+
+# 标签太多会刷屏，超过就截断
+MAX_TAGS_IN_INFO = 15
+
+
+def _extract_pixiv_artwork_id(text: str) -> str:
+    """从文本里找出 Pixiv 作品 ID，找不到返回 None。"""
+    for pattern in PIXIV_ARTWORK_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _extract_pixiv_user_id(text: str) -> str:
+    """从文本里找出 Pixiv 画师 UID，找不到返回 None。"""
+    match = PIXIV_USER_RE.search(text)
+    return match.group(1) if match else None
+
+
+# 本插件注册的指令名。AstrBot 的 waking 阶段会把 wake_prefix（默认 "/"）从
+# event.message_str 里剥掉再交给 handler，所以这里比较的是剥掉前缀后的第一个 token。
+PLUGIN_COMMAND_NAMES = frozenset(
+    {
+        "pid2pdf",
+        "pid",
+        "pixiv_ranking",
+        "puid",
+        "订阅画师",
+        "删除订阅",
+        "刷新订阅",
+        "pid_help",
+        "pid_config",
+    }
+)
+
+
+def _looks_like_plugin_command(text: str) -> bool:
+    """这条消息是不是本插件的指令调用。
+
+    用于让链接识别跳过指令消息，避免 /pid2pdf <链接> 这类写法既被指令处理、
+    又被链接识别处理，导致重复发送。
+    """
+    if not text:
+        return False
+    return text.split(maxsplit=1)[0] in PLUGIN_COMMAND_NAMES
+
+
+def _parse_pid_arg(raw: str) -> str:
+    """指令参数可以是纯数字 PID，也可以是 Pixiv 作品链接。"""
+    raw = (raw or "").strip()
+    if raw.isdigit():
+        return raw
+    return _extract_pixiv_artwork_id(raw)
+
+
+def _parse_uid_arg(raw: str) -> str:
+    """指令参数可以是纯数字 UID，也可以是 Pixiv 画师链接。"""
+    raw = (raw or "").strip()
+    if raw.isdigit():
+        return raw
+    return _extract_pixiv_user_id(raw)
+
+
+def _is_r18_artwork(tags: Any) -> bool:
+    """作品是否带 R-18 / R-18G 标签。
+
+    这里用 tag 的原始 name 判断，不用 translated_name，避免翻译改写标签名；
+    同时兼容 tag 是字符串的极端情况。
+    """
+    for tag in tags or []:
+        name = tag if isinstance(tag, str) else getattr(tag, "name", None)
+        if name in ("R-18", "R-18G"):
+            return True
+    return False
+
+
+def _format_tags(tags: Any, limit: int = MAX_TAGS_IN_INFO) -> str:
+    """把 Pixiv 的标签列表拼成一行文本，优先用翻译后的名字。"""
+    names: List[str] = []
+    for tag in tags or []:
+        if isinstance(tag, str):
+            name = tag
+        else:
+            name = getattr(tag, "translated_name", None) or getattr(tag, "name", None)
+        if name and name not in names:
+            names.append(str(name))
+    if not names:
+        return ""
+    if len(names) > limit:
+        names = names[:limit] + ["…"]
+    return "、".join(names)
+
+
+def _format_artwork_info(
+    artwork: dict,
+    index: int = None,
+    include_tags: bool = False,
+    include_r18: bool = False,
+) -> str:
+    """拼装作品信息文本。
+
+    /pid、/pid2pdf、排行榜共用这一份格式，避免各处各写一遍导致显示不一致。
+    index 不为空时输出 "#1 PID: xxx"，否则输出 "#PID: xxx"。
+    """
+    prefix = f"#{index} " if index is not None else "#"
+    info = f"{prefix}PID: {artwork.get('id')}\n"
+    info += f"标题: {artwork.get('title')}\n"
+    user = artwork.get("user") or {}
+    info += f"作者: {user.get('name')}({user.get('id')})"
+
+    flags: List[str] = []
+    pages = artwork.get("meta_pages")
+    if pages:
+        flags.append(f"多图作品，共{len(pages)}张")
+    if artwork.get("is_ai", False):
+        flags.append("AI作品")
+    if include_r18 and _is_r18_artwork(artwork.get("tags")):
+        flags.append("R18/R18G作品")
+    if flags:
+        info += "\n" + " | ".join(flags)
+
+    if include_tags:
+        tag_line = _format_tags(artwork.get("tags"))
+        if tag_line:
+            info += f"\n标签: {tag_line}"
+    return info
+
+
+def _total_pages(artwork: dict) -> int:
+    """作品总页数。单图作品记 1 页，拿不到信息记 0。"""
+    pages = artwork.get("meta_pages") or []
+    if pages:
+        return len(pages)
+    return 1 if artwork.get("meta_single_page") else 0
+
+
+def _is_partial(artwork: dict, image_paths: list) -> bool:
+    """实际拿到的图片是否少于作品总页数（即只能当预览用）。"""
+    total = _total_pages(artwork)
+    return bool(total) and len(image_paths) < total
+
+
+@register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.5")
 class Pid2PdfPlugin(Star):
     def __init__(self, context: Context, config : dict):
         super().__init__(context)
@@ -211,69 +372,79 @@ class Pid2PdfPlugin(Star):
     @filter.command("pid2pdf")
     async def pid_to_pdf(self, event: AstrMessageEvent):
         """根据Pixiv ID下载图片并生成PDF"""
+        # 解析用户输入的PID（也接受 Pixiv 作品链接）
+        message_parts = event.message_str.strip().split()
+        if len(message_parts) < 2:
+            yield event.plain_result("请提供Pixiv ID，格式: /pid2pdf <PID>")
+            return
+        pid = _parse_pid_arg(message_parts[1])
+        if not pid:
+            yield event.plain_result(
+                "Pixiv ID必须是数字，也可以直接把 Pixiv 作品链接发出来"
+            )
+            return
+        async for result in self._send_artwork_pdf(event, pid):
+            yield result
+
+    async def _send_artwork_pdf(self, event: AstrMessageEvent, pid: str):
+        """获取作品并发送完整版 PDF（命中缓存则直接发缓存）"""
         try:
-            # 解析用户输入的PID
-            message_parts = event.message_str.strip().split()
-            if len(message_parts) < 2:
-                yield event.plain_result("请提供Pixiv ID，格式: /pid2pdf <PID>")
-                return
-            
-            pid = message_parts[1].strip()
-            if not pid.isdigit():
-                yield event.plain_result("Pixiv ID必须是数字")
-                return
-            #检查本地是否存在PID的PDF文件
+            # 只有完整版才会存成 pixiv_<pid>.pdf，预览版另带 _preview 后缀，
+            # 所以这里命中缓存就一定是完整的
             pdf_path = self.persistent_dir / f"pixiv_{pid}.pdf"
             if pdf_path.exists():
                 # logger.info(f"本地已存在该PID的PDF文件: {pdf_path}")
-                # 发送PDF文件
+                # 命中缓存也要先把作品信息发出来，取不到信息就只发文件
+                artwork_info = await self._get_artwork_info(pid)
+                if artwork_info:
+                    yield event.plain_result(
+                        _format_artwork_info(
+                            artwork_info, include_tags=True, include_r18=True
+                        )
+                    )
+                else:
+                    yield event.plain_result(f"#PID: {pid}\n（本次使用本地缓存）")
                 async for result in self._send_pdf(event, pdf_path, pid):
                     yield result
                 return
-            
+
             yield event.plain_result(f"开始获取 Pixiv 作品: {pid}，请稍候...")
-            
+
             # 获取作品详情
             artwork_info = await self._get_artwork_info(pid)
             if not artwork_info:
                 yield event.plain_result(f"无法获取PID {pid} 的作品信息")
                 return
-            
+
             # 下载图片
             image_paths = await self._download_images(artwork_info, pid)
             if not image_paths:
                 yield event.plain_result(f"下载PID {pid} 的图片失败")
                 return
-            #发送作品信息
+
+            # 发送作品信息
             pid = str(artwork_info["id"])
-            title = artwork_info["title"]
-            author = artwork_info['user']['name']
-            author_id = artwork_info['user']['id']
-            views = artwork_info["total_view"]
-            bookmarks = artwork_info["total_bookmarks"]
-            # create_date = artwork_info["create_date"][:10]  # 只取日期部分
-            is_ai = artwork_info.get("is_ai", False)
-            info_text = f"#PID: {pid}\n"
-            info_text += f"标题: {title}\n"
-            info_text += f"作者: {author}({author_id})\n"
-            # info_text += f"发布日期: {create_date}\n"
-            # info_text += f"浏览: {views} | 收藏: {bookmarks}"
-            pages = artwork_info.get("meta_pages")
-            if pages:
-                info_text += f"多图作品，共{len(pages)}张"
-            if is_ai:
-                info_text += " | AI作品"
-            yield event.plain_result(info_text)
-            # 生成PDF
-            pdf_path = await self._create_pdf(image_paths, pid)
+            yield event.plain_result(
+                _format_artwork_info(artwork_info, include_tags=True, include_r18=True)
+            )
+
+            # 生成PDF。万一没下全（个别图失败），也按预览命名，
+            # 免得半份 PDF 被当成完整缓存
+            preview = _is_partial(artwork_info, image_paths)
+            if preview:
+                logger.warning(
+                    f"PID {pid} 只拿到 {len(image_paths)}/{_total_pages(artwork_info)} 张，"
+                    f"按预览版命名"
+                )
+            pdf_path = await self._create_pdf(image_paths, pid, preview=preview)
             if not pdf_path:
                 yield event.plain_result(f"生成PDF失败")
                 return
-            
+
             # 发送PDF文件
             async for result in self._send_pdf(event, pdf_path, pid):
                  yield result
-            
+
         except Exception as e:
             logger.error(f"处理PID转PDF时出错: {e}")
             yield event.plain_result(f"处理过程中出现错误: {str(e)}")
@@ -281,17 +452,23 @@ class Pid2PdfPlugin(Star):
     @filter.command("pid")
     async def pid(self, event: AstrMessageEvent):
         """根据Pixiv ID下载图片并发送"""
+        # 解析用户输入的PID（也接受 Pixiv 作品链接）
+        message_parts = event.message_str.strip().split()
+        if len(message_parts) < 2:
+            yield event.plain_result("请提供Pixiv ID，格式: /pid <PID>")
+            return
+        pid = _parse_pid_arg(message_parts[1])
+        if not pid:
+            yield event.plain_result(
+                "Pixiv ID必须是数字，也可以直接把 Pixiv 作品链接发出来"
+            )
+            return
+        async for result in self._send_artwork_images(event, pid):
+            yield result
+
+    async def _send_artwork_images(self, event: AstrMessageEvent, pid: str):
+        """获取作品并直接发送图片。也供 Pixiv 链接识别复用。"""
         try:
-            # 解析用户输入的PID
-            message_parts = event.message_str.strip().split()
-            if len(message_parts) < 2:
-                yield event.plain_result("请提供Pixiv ID，格式: /pid2pdf <PID>")
-                return
-            
-            pid = message_parts[1].strip()
-            if not pid.isdigit():
-                yield event.plain_result("Pixiv ID必须是数字")
-                return
             img_path = self.temp_dir / f"{pid}"
             yield event.plain_result(f"开始获取 Pixiv 作品: {pid}，请稍候...")
             # 获取作品详情
@@ -299,35 +476,22 @@ class Pid2PdfPlugin(Star):
             if not artwork_info:
                 yield event.plain_result(f"无法获取PID {pid} 的作品信息")
                 return
-            
+
             # 下载图片
             image_paths = await self._download_images(artwork_info, pid)
             if not image_paths:
                 yield event.plain_result(f"下载PID {pid} 的图片失败")
                 return
-            #发送作品信息
+
+            # 发送作品信息（含标签）
             pid = str(artwork_info["id"])
-            title = artwork_info["title"]
-            author = artwork_info['user']['name']
-            author_id = artwork_info['user']['id']
-            is_ai = artwork_info.get("is_ai", False)
-            tags = artwork_info.get("tags", [])
-            info_text = f"#PID: {pid}\n"
-            info_text += f"标题: {title}\n"
-            info_text += f"作者: {author}({author_id})\n"
-            pages = artwork_info.get("meta_pages")
-            is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in tags)
-            if pages:
-                info_text += f"多图作品，共{len(pages)}张"
-            if is_ai:
-                info_text += " | AI作品"
-            if is_r18_r18g:
-                info_text += " | R18/R18G作品"
-            yield event.plain_result(info_text)
+            yield event.plain_result(
+                _format_artwork_info(artwork_info, include_tags=True, include_r18=True)
+            )
             # 发送图片
             async for result in self._send_img(event, img_path, pid):
                 yield result
-            
+
         except Exception as e:
             logger.error(f"处理PID出错: {e}")
             yield event.plain_result(f"处理过程中出现错误: {str(e)}")
@@ -462,12 +626,17 @@ class Pid2PdfPlugin(Star):
             logger.error(f"下载单张图片失败: {e}")
             return None
 
-    async def _create_pdf(self, image_paths: List[Path], pdf_name: str) -> Path:
-        """将图片转换为PDF"""
+    async def _create_pdf(self, image_paths: List[Path], pdf_name: str, preview: bool = False) -> Path:
+        """将图片转换为PDF
+
+        preview=True 表示这只是部分页数的预览版，文件名会带 _preview 后缀，
+        这样 /pid2pdf 的完整版缓存不会误命中一个只有前 10 张的 PDF。
+        """
         try:
             if not image_paths:
                 return None
-            pdf_path = self.persistent_dir / f"pixiv_{pdf_name}.pdf"
+            suffix = "_preview" if preview else ""
+            pdf_path = self.persistent_dir / f"pixiv_{pdf_name}{suffix}.pdf"
 
             # img2pdf.convert 和写盘都是同步阻塞操作，多图作品会卡住整个
             # AstrBot 事件循环，这里丢到线程里执行。
@@ -676,23 +845,9 @@ class Pid2PdfPlugin(Star):
             is_r18 = mode in R18_RANKING_MODES
             for i, artwork in enumerate(ranking_data, 1):
                 pid = str(artwork["id"])
-                title = artwork["title"]
-                author = artwork["user"]["name"]
-                author_id = artwork['user']['id']
-                views = artwork["total_view"]
-                bookmarks = artwork["total_bookmarks"]
-                is_ai = artwork.get("is_ai", False)
-                
+                is_r18 = mode in R18_RANKING_MODES
                 # 构建作品信息
-                info_text = f"#{i} PID: {pid}\n"
-                info_text += f"标题: {title}\n"
-                info_text += f"作者: {author}({author_id})\n"
-                # info_text += f"浏览: {views} | 收藏: {bookmarks}"
-                pages = artwork.get("meta_pages")
-                if pages:
-                    info_text += f"多图作品，共{len(pages)}张"
-                if is_ai:
-                    info_text += " | AI作品"
+                info_text = _format_artwork_info(artwork, index=i)
                 if is_r18:
                     combined_infos.append(info_text + "\n\n")
                 else:
@@ -729,11 +884,12 @@ class Pid2PdfPlugin(Star):
                 #     yield event.plain_result("---")
             if len(pdf_img_paths) > 0:
                 pdf_name = f"{mode}_{date.today()}"
-                pdf_path = await self._create_pdf(pdf_img_paths, pdf_name)
+                # 排行榜每个作品只取第一张，天然是预览集合，按预览命名
+                pdf_path = await self._create_pdf(pdf_img_paths, pdf_name, preview=True)
                 if not pdf_path:
                     yield event.plain_result(f"生成PDF失败")
                     return
-                yield event.chain_result([File(file=str(pdf_path),name=f"{pdf_name}.pdf")])
+                yield event.chain_result([File(file=str(pdf_path),name=pdf_path.name)])
                 chain = []
                 for info in combined_infos:
                     chain.append(Plain(info))
@@ -851,7 +1007,7 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in illust.tags)
+                is_r18_r18g = _is_r18_artwork(illust.tags)
                 if r18_mode == "过滤 R18" and is_r18_r18g:
                     continue
                 elif r18_mode == "仅 R18" and not is_r18_r18g:
@@ -947,7 +1103,7 @@ class Pid2PdfPlugin(Star):
             filtered_works = []
             for illust in result.illusts:
                 # R18过滤
-                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in illust.tags)
+                is_r18_r18g = _is_r18_artwork(illust.tags)
                 if r18_mode == "过滤 R18" and is_r18_r18g:
                     continue
                 elif r18_mode == "仅 R18" and not is_r18_r18g:
@@ -1002,7 +1158,7 @@ class Pid2PdfPlugin(Star):
                 info_text = f"#{i} PID: {pid}\n"
                 info_text += f"标题: {title}\n"
                 pages = artwork.get("meta_pages")
-                is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in artwork["tags"])
+                is_r18_r18g = _is_r18_artwork(artwork["tags"])
                 if pages:
                     info_text += f"多图作品，共{len(pages)}张"
                 if is_ai:
@@ -1041,32 +1197,73 @@ class Pid2PdfPlugin(Star):
 
     @filter.command("订阅画师")
     async def add_sub(self, event: AstrMessageEvent):
-        if not self.enable_subscription:
-            yield event.plain_result("订阅功能未开启")
-            return
         """订阅画师最新作品"""
         # 解析用户输入的参数
         message_parts = event.message_str.strip().split()
         if len(message_parts) < 2:
             yield event.plain_result("请提供画师UID，格式: /订阅画师 123456")
             return
-        
-        uid = message_parts[1].strip()
+
+        uid = _parse_uid_arg(message_parts[1])
+        if not uid:
+            yield event.plain_result(
+                "画师UID必须是数字，也可以直接把 Pixiv 画师链接发出来"
+            )
+            return
+        async for result in self._subscribe_artist(event, uid):
+            yield result
+
+    async def _subscribe_artist(self, event: AstrMessageEvent, uid: str):
+        """订阅画师，并立刻拉一次最新作品发出来。
+
+        也供 Pixiv 画师链接识别复用。
+        """
+        if not self.enable_subscription or self.sub_center is None:
+            yield event.plain_result("订阅功能未开启")
+            return
         if not uid.isdigit():
             yield event.plain_result("画师UID必须是数字")
             return
+
         group_id = event.unified_msg_origin
-        
         # 添加订阅
         await self.sub_center.add_subscription(uid, group_id)
-        yield event.plain_result(f"成功订阅画师 UID: {uid} 的最新作品，使用命令「刷新订阅」可立即获取最新作品")
+        yield event.plain_result(
+            f"成功订阅画师 UID: {uid} 的最新作品，使用命令「刷新订阅」可立即获取最新作品"
+        )
+
+        # 订阅成功后立刻按 /puid 的方式拉一次，并把这次已经发过的最新作品 ID
+        # 写进订阅记录，免得下一轮定时刷新把刚发过的作品重复发一遍
+        artist_works = await self._get_artist_works(uid, 5)
+        if not artist_works:
+            yield event.plain_result(f"暂时无法获取画师 {uid} 的作品，之后会自动刷新")
+            return
+
+        artist_name = artist_works.get("artist_name")
+        works = artist_works.get("works") or []
+        if not works:
+            yield event.plain_result(
+                f"画师 {artist_name} (UID: {uid}) 没有符合过滤条件的作品"
+            )
+            return
+
+        yield event.plain_result(
+            f"画师: {artist_name} (UID: {uid})\n共找到 {len(works)} 个作品"
+        )
+        async for result in self._send_artist_works(event, artist_works, uid, len(works)):
+            yield result
+
+        newest_id = max(int(work["id"]) for work in works)
+        await self.sub_center.renew_last_updated_id(uid, newest_id)
+        await self.sub_center.renew_last_updated_time(uid)
+        logger.info(f"订阅画师 {uid} 完成，最新作品ID已记录为 {newest_id}")
 
     @filter.command("删除订阅")
     async def remove_sub(self, event: AstrMessageEvent):
-        if not self.enable_subscription:
+        """删除订阅"""
+        if not self.enable_subscription or self.sub_center is None:
             yield event.plain_result("订阅功能未开启")
             return
-        """删除订阅"""
         # 解析用户输入的参数
         message_parts = event.message_str.strip().split()
         if len(message_parts) < 2:
@@ -1088,9 +1285,11 @@ class Pid2PdfPlugin(Star):
 
     @filter.command("刷新订阅")
     async def refresh_subscriptions(self, event: AstrMessageEvent):
-        if not self.enable_subscription:
+        """手动触发一次订阅刷新"""
+        if not self.enable_subscription or self.sub_center is None:
             yield event.plain_result("订阅功能未开启")
             return
+        yield event.plain_result("开始手动刷新订阅，请稍候…")
         await self.sub_center.manual_refresh()
 
     async def _handle_sub_update(self, sub_data_list: list[SubscriptionData]):
@@ -1150,32 +1349,35 @@ class Pid2PdfPlugin(Star):
                         await asyncio.sleep(3)
                         #发送作品信息
                         pid = str(artwork_info["id"])
-                        title = artwork_info["title"]
-                        is_ai = artwork_info.get("is_ai", False)
-                        is_r18_r18g = any(tag.name in ("R-18", "R-18G") for tag in artwork_info["tags"])
-                        info_text = f"#PID: {pid}\n"
-                        info_text += f"标题: {title}\n"
-                        pages = artwork_info.get("meta_pages")
-                        if pages:
-                            info_text += f"多图作品，共{len(pages)}张"
-                        if is_ai:
-                            info_text += "AI作品"
+                        is_r18_r18g = _is_r18_artwork(artwork_info.get("tags"))
+                        info_text = _format_artwork_info(
+                            artwork_info, include_tags=True, include_r18=True
+                        )
                         for group_id in sub_groups:
                             await self.context.send_message(group_id, MessageChain().message(info_text))
 
-                        # 下载图片
+                        # 下载图片（订阅只下前 10 张做预览）
                         image_paths = await self._download_images(artwork_info, pid, 10)
                         if not image_paths:
                             logger.info(f"下载PID {pid} 的图片失败")
                         else:
                             img_msg_chain = MessageChain()
                             if is_r18_r18g:
-                                # 生成PDF
-                                pdf_path = await self._create_pdf(image_paths, pid)
+                                # 生成PDF。订阅最多只下 10 张，没下全就按预览命名，
+                                # 免得 /pid2pdf 把它当成完整缓存直接发出去
+                                preview = _is_partial(artwork_info, image_paths)
+                                pdf_path = await self._create_pdf(
+                                    image_paths, pid, preview=preview
+                                )
                                 if not pdf_path:
                                     img_msg_chain = img_msg_chain.message("生成pdf失败")
                                 else:
-                                    img_msg_chain.chain = [File(file=str(pdf_path.absolute()), name=f"{pid}.pdf")]
+                                    img_msg_chain.chain = [
+                                        File(
+                                            file=str(pdf_path.absolute()),
+                                            name=pdf_path.name,
+                                        )
+                                    ]
                             else:
                                 for img in image_paths:
                                     img_msg_chain = img_msg_chain.file_image(str(img.absolute()))
@@ -1191,21 +1393,43 @@ class Pid2PdfPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def handle_text_event(self, event: AstrMessageEvent):
-        """简易命令： 今日色图 今日ai色图 今日排行榜 今日ai图 刷新订阅"""
-        if event.message_str == "今日色图":
-            async for result in self._process_ranking_request(event, mode = "day_r18", date = None, count = 10):
+        """简易命令 + Pixiv 链接识别
+
+        简易命令：今日色图 今日ai色图 今日排行榜 今日ai图
+        链接识别：作品链接走 /pid，画师链接走 /订阅画师
+        """
+        text = event.message_str.strip()
+
+        # 0) 指令消息交给指令处理器，避免 /pid <链接> 这类写法重复触发
+        if _looks_like_plugin_command(text):
+            return
+
+        # 1) 简易命令
+        if text in SIMPLE_COMMAND_MODES:
+            async for result in self._process_ranking_request(
+                event, mode=SIMPLE_COMMAND_MODES[text], date=None, count=10
+            ):
                 yield result
-        elif event.message_str == "今日ai色图":
-            async for result in self._process_ranking_request(event, mode = "day_r18_ai", date = None, count = 10):
+            return
+
+        # 2) Pixiv 作品链接 -> 走 /pid
+        pid = _extract_pixiv_artwork_id(text)
+        if pid:
+            logger.info(f"识别到 Pixiv 作品链接，PID: {pid}")
+            async for result in self._send_artwork_images(event, pid):
                 yield result
-        elif event.message_str == "今日排行榜":
-            async for result in self._process_ranking_request(event, mode = "day_male", date = None, count = 10):
+            return
+
+        # 3) Pixiv 画师链接 -> 走订阅画师
+        uid = _extract_pixiv_user_id(text)
+        if uid:
+            logger.info(f"识别到 Pixiv 画师链接，UID: {uid}")
+            async for result in self._subscribe_artist(event, uid):
                 yield result
-        elif event.message_str == "今日ai图":
-            async for result in self._process_ranking_request(event, mode = "day_ai", date = None, count = 10):
-                yield result
-        #彩蛋 随机排行榜 超过一天后可再次触发，几率10%
-        elif (
+            return
+
+        # 4) 彩蛋 随机排行榜 超过一天后可再次触发，几率10%
+        if (
             self.easter_egg
             and self.easter_egg_list  # 空列表会让 random.choice 抛异常
             and int(datetime.now().timestamp()) - self.egg_trigger_time > 86400
@@ -1216,17 +1440,10 @@ class Pid2PdfPlugin(Star):
                 await f.write(str(self.egg_trigger_time))
             rank_name = random.choice(self.easter_egg_list)
             yield event.plain_result(f"你触发了今天的彩蛋！即将发送：{rank_name}")
-            if rank_name == "今日色图":
-                async for result in self._process_ranking_request(event, mode = "day_r18", date = None, count = 10):
-                    yield result
-            elif rank_name == "今日ai色图":
-                async for result in self._process_ranking_request(event, mode = "day_r18_ai", date = None, count = 10):
-                    yield result
-            elif rank_name == "今日排行榜":
-                async for result in self._process_ranking_request(event, mode = "day_male", date = None, count = 10):
-                    yield result
-            elif rank_name == "今日ai图":
-                async for result in self._process_ranking_request(event, mode = "day_ai", date = None, count = 10):
+            if rank_name in SIMPLE_COMMAND_MODES:
+                async for result in self._process_ranking_request(
+                    event, mode=SIMPLE_COMMAND_MODES[rank_name], date=None, count=10
+                ):
                     yield result
 
 
@@ -1245,7 +1462,7 @@ Pid2Pdf 插件使用说明：
 /pid <Pixiv_ID> - 根据Pixiv ID下载图片并发送
 /pixiv_ranking [类型] [数量] - 获取Pixiv排行榜作品
 /puid <UID> [数量] - 根据画师UID下载最新作品
-/订阅画师 <UID> - 订阅画师的最新作品
+/订阅画师 <UID> - 订阅画师的最新作品（订阅后立刻拉一次最新作品）
 /删除订阅 <UID> - 取消订阅
 /刷新订阅 - 立即刷新一次订阅
 /pid_config - 查看当前配置状态
@@ -1255,6 +1472,12 @@ Pid2Pdf 插件使用说明：
 
 简易命令（群里直接发这几个词即可）：
 今日色图 / 今日ai色图 / 今日排行榜 / 今日ai图
+
+链接识别（群里直接发链接即可）：
+https://www.pixiv.net/artworks/123456789  -> 等同于 /pid 123456789
+https://www.pixiv.net/users/12345678      -> 等同于 /订阅画师 12345678
+
+另外 /pid、/pid2pdf、/订阅画师 的参数也可以直接填链接。
 
 示例：
 /pid2pdf 123456789
