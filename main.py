@@ -231,17 +231,20 @@ def _format_artwork_info(
     index: int = None,
     include_tags: bool = False,
     include_r18: bool = False,
+    include_author: bool = True,
 ) -> str:
     """拼装作品信息文本。
 
-    /pid、/pid2pdf、排行榜共用这一份格式，避免各处各写一遍导致显示不一致。
-    index 不为空时输出 "#1 PID: xxx"，否则输出 "#PID: xxx"。
+    /pid、/pid2pdf、排行榜、画师作品列表共用这一份格式，避免各处各写一遍
+    导致显示不一致。index 不为空时输出 "#1 PID: xxx"，否则输出 "#PID: xxx"；
+    画师作品列表里作者是冗余的，用 include_author=False 去掉。
     """
     prefix = f"#{index} " if index is not None else "#"
-    info = f"{prefix}PID: {artwork.get('id')}\n"
-    info += f"标题: {artwork.get('title')}\n"
-    user = artwork.get("user") or {}
-    info += f"作者: {user.get('name')}({user.get('id')})"
+    lines = [f"{prefix}PID: {artwork.get('id')}", f"标题: {artwork.get('title')}"]
+
+    if include_author:
+        user = artwork.get("user") or {}
+        lines.append(f"作者: {user.get('name')}({user.get('id')})")
 
     flags: List[str] = []
     pages = artwork.get("meta_pages")
@@ -252,13 +255,14 @@ def _format_artwork_info(
     if include_r18 and _is_r18_artwork(artwork.get("tags")):
         flags.append("R18/R18G作品")
     if flags:
-        info += "\n" + " | ".join(flags)
+        lines.append(" | ".join(flags))
 
     if include_tags:
         tag_line = _format_tags(artwork.get("tags"))
         if tag_line:
-            info += f"\n标签: {tag_line}"
-    return info
+            lines.append(f"标签: {tag_line}")
+
+    return "\n".join(lines)
 
 
 def _total_pages(artwork: dict) -> int:
@@ -1152,18 +1156,16 @@ class Pid2PdfPlugin(Star):
             works = artist_data["works"]
             for i, artwork in enumerate(works, 1):
                 pid = str(artwork["id"])
-                title = artwork["title"]
-                is_ai = artwork.get("is_ai", False)
-                # 构建作品信息
-                info_text = f"#{i} PID: {pid}\n"
-                info_text += f"标题: {title}\n"
-                pages = artwork.get("meta_pages")
-                is_r18_r18g = _is_r18_artwork(artwork["tags"])
-                if pages:
-                    info_text += f"多图作品，共{len(pages)}张"
-                if is_ai:
-                    info_text += " | AI作品"
-                
+                # 构建作品信息：这里省略作者（列表本身就是某位画师的），
+                # 但保留标签和 R18 标记
+                info_text = _format_artwork_info(
+                    artwork,
+                    index=i,
+                    include_tags=True,
+                    include_r18=True,
+                    include_author=False,
+                )
+
                 yield event.plain_result(info_text)
                 
                 # 下载并发送第一张图片作为预览
@@ -1229,7 +1231,7 @@ class Pid2PdfPlugin(Star):
         # 添加订阅
         await self.sub_center.add_subscription(uid, group_id)
         yield event.plain_result(
-            f"成功订阅画师 UID: {uid} 的最新作品，使用命令「刷新订阅」可立即获取最新作品"
+            f"成功订阅画师 UID: {uid} "
         )
 
         # 订阅成功后立刻按 /puid 的方式拉一次，并把这次已经发过的最新作品 ID
