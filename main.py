@@ -1,10 +1,10 @@
 from datetime import datetime, date
-from typing import List
+from typing import Any, List
 from pathlib import Path
 import aiohttp
 import aiofiles
 import asyncio
-import time
+import re
 import random
 
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
@@ -18,6 +18,102 @@ import img2pdf
 
 from .subscription import SubscriptionCenter, SubscriptionData
 
+# 排行榜模式白名单，与 README / /pid_help 保持一致。
+# 注意 pixivpy3 的 _MODE 类型别名已过时（不含 day_ai 系列），
+# 但 App API 实际接受下面这些模式，mode 是原样透传给接口的。
+# 字典同时作为模式的中文说明，/pid_help 直接从它生成，避免两边脱节。
+RANKING_MODE_LABELS = {
+    "day": "日榜（默认）",
+    "week": "周榜",
+    "month": "月榜",
+    "day_male": "男性向日榜",
+    "day_female": "女性向日榜",
+    "week_original": "原创周榜",
+    "week_rookie": "新人周榜",
+    "day_manga": "漫画日榜",
+    "day_r18": "R18 日榜",
+    "day_male_r18": "R18 男性向日榜",
+    "day_female_r18": "R18 女性向日榜",
+    "week_r18": "R18 周榜",
+    "week_r18g": "R18G 周榜",
+    "day_ai": "AI 作品日榜",
+    "day_r18_ai": "R18 AI 作品日榜",
+    "week_r18_ai": "R18 AI 作品周榜",
+}
+
+RANKING_MODES = tuple(RANKING_MODE_LABELS)
+
+# 属于 R18 的排行榜模式：这些才需要走 PDF 通道，其它模式不应该被 R18 设置改写
+R18_RANKING_MODES = frozenset(
+    {
+        "day_r18",
+        "day_male_r18",
+        "day_female_r18",
+        "week_r18",
+        "week_r18g",
+        "day_r18_ai",
+        "week_r18_ai",
+    }
+)
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """把配置项转成 bool。
+
+    _conf_schema.json 里曾经把 bool 类型的 default 写成字符串 "false"，
+    而 AstrBot 是把 default 原样写进配置的，所以老用户的配置里可能存着
+    字符串 "false" —— 它是真值，不能直接 if。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _as_int(value: Any, default: int) -> int:
+    """把配置项转成 int，无法转换时回退到 default。
+
+    同样是为了兼容历史配置：schema 里 int 类型的 default 曾写成字符串 "90"。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning(f"配置项 {value!r} 不是合法整数，回退为 {default}")
+        return default
+
+
+def _image_sort_key(path: Path) -> tuple:
+    """按文件名里的数字排序，保证 image_2.jpg 排在 image_10.jpg 前面。"""
+    match = re.search(r"(\d+)", path.stem)
+    return (int(match.group(1)) if match else 0, path.name)
+
+
+def _sorted_images(directory: Path) -> List[Path]:
+    """列出目录里的图片文件并按页码排序。
+
+    直接用 iterdir() 拿到的是文件系统顺序，多图作品的发送顺序和预览图
+    都会错乱，所以这里统一排一次序。
+    """
+    if not directory or not directory.exists():
+        return []
+    return sorted(
+        (p for p in directory.iterdir() if p.is_file()),
+        key=_image_sort_key,
+    )
+
+
+def _is_ai_illust(illust: Any) -> bool:
+    """判断作品是否是 AI 生成。
+
+    pixivpy3 的 JsonDict 对不存在的键返回 None 而不是抛 AttributeError，
+    所以这里直接比较即可（字段缺失时结果是 False）。
+    """
+    return getattr(illust, "illust_ai_type", None) == 2
+
+
 @register("pid2pdf", "Joker42S", "根据Pixiv ID下载图片并保存为PDF发送", "1.0.3")
 class Pid2PdfPlugin(Star):
     def __init__(self, context: Context, config : dict):
@@ -25,29 +121,42 @@ class Pid2PdfPlugin(Star):
         self.config = config
         self.context = context
         self.papi = None
+        # 这些属性在 initialize() 里才会被真正赋值。先在构造函数里给一份
+        # 安全默认值，这样 initialize() 半路失败时 terminate() 之类的地方
+        # 不会因为属性不存在而抛 AttributeError。
+        self.plugin_name = "pid2pdf"
+        self.base_dir = None
         self.temp_dir = None
+        self.persistent_dir = None
+        self.sub_center = None
         self.refresh_token = None
         self.proxy = None
         self.reverse_proxy = None
         self.use_reverse_proxy = False
+        self.refresh_interval = 90
+        self.easter_egg = False
+        self.easter_egg_list = []
+        self.enable_subscription = False
+        self.max_update_limit = 10
         self.egg_trigger_time = 0
         self.egg_trigger_record_file = None
-        self.enable_subscription = False
 
     async def initialize(self):
         """插件初始化方法"""
         try:
-            self.plugin_name = "pid2pdf"
             # 从配置中获取refresh_token和代理设置
-            self.refresh_token = self.config.get("refresh_token", "")
-            self.proxy = self.config.get("proxy", "")
-            self.use_reverse_proxy = self.config.get("use_reverse_proxy", False)
-            self.reverse_proxy = self.config.get("reverse_proxy", "")
-            self.refresh_interval = self.config.get("refresh_interval", 90)
-            self.easter_egg = self.config.get("easter_egg", False)
-            self.easter_egg_list = self.config.get("easter_egg_list", [])
-            self.enable_subscription = self.config.get("enable_subscription", False)
-            
+            self.refresh_token = self.config.get("refresh_token", "") or ""
+            self.proxy = self.config.get("proxy", "") or ""
+            self.use_reverse_proxy = _as_bool(self.config.get("use_reverse_proxy", False))
+            self.reverse_proxy = self.config.get("reverse_proxy", "") or ""
+            # refresh_interval 的单位是分钟，SubscriptionCenter 需要秒
+            self.refresh_interval = max(1, _as_int(self.config.get("refresh_interval", 90), 90))
+            self.easter_egg = _as_bool(self.config.get("easter_egg", False))
+            self.easter_egg_list = self.config.get("easter_egg_list") or []
+            self.enable_subscription = _as_bool(self.config.get("enable_subscription", False))
+            # 注意：schema 里的键名是 max_update_limit，不是 update_limit
+            self.max_update_limit = max(1, _as_int(self.config.get("max_update_limit", 10), 10))
+
             # 设置代理（如果配置了）
             _REQUESTS_KWARGS: dict[str, Any] = {
                 'proxies': {
@@ -97,7 +206,7 @@ class Pid2PdfPlugin(Star):
             logger.info(f"Pid2Pdf插件初始化完成，临时目录: {self.temp_dir}")
             
         except Exception as e:
-            logger.error(f"Pid2Pdf插件初始化失败: {e}")
+            logger.error(f"Pid2Pdf插件初始化失败: {e}", exc_info=True)
 
     @filter.command("pid2pdf")
     async def pid_to_pdf(self, event: AstrMessageEvent):
@@ -253,7 +362,9 @@ class Pid2PdfPlugin(Star):
                         "total_view": artwork.total_view,
                         "total_bookmarks": artwork.total_bookmarks,
                         "sanity_level": artwork.sanity_level,
-                        "tags": artwork.tags
+                        "tags": artwork.tags,
+                        # /pid 和 /pid2pdf 的信息里也要能显示 AI 标记
+                        "is_ai": _is_ai_illust(artwork)
                     }
                 else:
                     logger.info("尝试重新登录Pixiv")
@@ -337,7 +448,7 @@ class Pid2PdfPlugin(Star):
                         
                         img_data = await response.read()
                         if modify_hash:
-                            img_data = await _image_obfus(img_data)
+                            img_data = await asyncio.to_thread(_image_obfus, img_data)
                         async with aiofiles.open(file_path, 'wb') as f:
                             await f.write(img_data)
                         
@@ -357,9 +468,14 @@ class Pid2PdfPlugin(Star):
             if not image_paths:
                 return None
             pdf_path = self.persistent_dir / f"pixiv_{pdf_name}.pdf"
-            # 将图片转换为PDF
-            with open(pdf_path, 'wb') as f:
-                f.write(img2pdf.convert(image_paths))
+
+            # img2pdf.convert 和写盘都是同步阻塞操作，多图作品会卡住整个
+            # AstrBot 事件循环，这里丢到线程里执行。
+            def _write_pdf() -> None:
+                with open(pdf_path, 'wb') as f:
+                    f.write(img2pdf.convert(image_paths))
+
+            await asyncio.to_thread(_write_pdf)
             # logger.info(f"生成PDF: {pdf_path}")
             return pdf_path
             
@@ -384,33 +500,36 @@ class Pid2PdfPlugin(Star):
     async def _send_img(self, event: AstrMessageEvent, img_path: Path, pid: str, fake_record = False):
         """发送图片文件给用户"""
         try:
-            if img_path.exists():
-                chain = [Plain(f'PID：{pid}')]
-                chains = [chain]
-                for img in img_path.iterdir():
-                    if not img.is_file():
-                        continue
-                    if len(chain) >= 10:
-                        chain = []
-                        chain.append(Image.fromFileSystem(str(img.absolute())))
-                        chains.append(chain)
-                    else:
-                        chain.append(Image.fromFileSystem(str(img.absolute())))
-                if fake_record:
-                    for chain in chains:
-                        node = Node(
-                                uin=event.get_self_id(),
-                                name="AstrBot",
-                                content=chain
-                            )
-                        yield event.chain_result([node])
-                else:
-                    for chain in chains:
-                        yield event.chain_result(chain)
-                # logger.info(f"图片已送: {pid}")
-                yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
-            else:
+            # 排序后再发送，否则 image_10 会排在 image_2 前面
+            imgs = _sorted_images(img_path)
+            if not imgs:
                 yield event.plain_result("图片发送失败")
+                return
+
+            # 每条消息链最多 10 个组件，超出就分页发送
+            chains: List[list] = []
+            chain: list = [Plain(f'PID：{pid}')]
+            for img in imgs:
+                if len(chain) >= 10:
+                    chains.append(chain)
+                    chain = []
+                chain.append(Image.fromFileSystem(str(img.absolute())))
+            if chain:
+                chains.append(chain)
+
+            if fake_record:
+                for one_chain in chains:
+                    node = Node(
+                            uin=event.get_self_id(),
+                            name="AstrBot",
+                            content=one_chain
+                        )
+                    yield event.chain_result([node])
+            else:
+                for one_chain in chains:
+                    yield event.chain_result(one_chain)
+            # logger.info(f"图片已送: {pid}")
+            yield event.plain_result("图片已发送，如果看不到，就是被企鹅的大手截胡了，改用/pid2pdf发送吧！")
             
         except Exception as e:
             logger.error(f"发送图片失败: {e}")
@@ -418,12 +537,15 @@ class Pid2PdfPlugin(Star):
 
 
     async def _cleanup_temp_files(self):
-        """清理临时文件"""
+        """清理临时文件
+
+        清理策略尚未实现（见 README 计划功能）。这里刻意保留 temp/ 缓存，
+        因为 _download_single_image 会靠它跳过重复下载。
+        """
         try:
             if self.temp_dir and self.temp_dir.exists():
-                import shutil
-                # shutil.rmtree(self.temp_dir)
-                logger.info("清理临时文件完成")
+                # TODO: 按策略（大小/时间）清理，目前只保留缓存
+                logger.debug("临时文件清理策略尚未实现，保留 temp/ 缓存")
         except Exception as e:
             logger.error(f"清理临时文件失败: {e}")
 
@@ -436,7 +558,6 @@ class Pid2PdfPlugin(Star):
             
             # 设置默认参数
             mode = "day"  # 默认日榜
-            content = "all"  # 默认全部内容
             date = None  # 默认当前日期
             count = 5  # 默认获取5个作品
             
@@ -444,25 +565,25 @@ class Pid2PdfPlugin(Star):
             if len(message_parts) >= 2:
                 # 第一个参数是排行榜类型
                 mode_input = message_parts[1].lower()
-                if mode_input in ["day", "week", "month", "day_male", "week_original", "day_manga", "day_r18", "week_r18", "day_ai", "day_r18_ai"]:
+                if mode_input in RANKING_MODES:
                     mode = mode_input
                 elif mode_input.isdigit():
-                    count = min(int(mode_input), 10)  # 最多10个作品
+                    count = max(1, min(int(mode_input), 10))  # 最多10个作品
             
             if len(message_parts) >= 3:
                 # 第二个参数可能是数量
                 if message_parts[2].isdigit():
-                    count = min(int(message_parts[2]), 10)
+                    count = max(1, min(int(message_parts[2]), 10))
 
-            # 应用R18过滤设置
+            # 应用R18过滤设置：只有 R18 榜才需要被降级，
+            # 以前的写法会把 day_male / week_rookie 这类正常榜单也改写成日榜。
             r18_mode = self.config.get("r18_mode", "过滤 R18")
-            if r18_mode == "过滤 R18":
-                if mode in ["day", "week", "month"]:
-                    pass  # 保持原模式，这些模式默认不包含R18
-                else:
-                    mode = "day"  # 强制使用日榜
-            
-            for result in self._process_ranking_request(event, mode, date, count):
+            if r18_mode == "过滤 R18" and mode in R18_RANKING_MODES:
+                mode = "day"  # 强制使用日榜
+
+            # 注意：_process_ranking_request 是异步生成器，必须用 async for，
+            # 用普通 for 会抛 TypeError: 'async_generator' object is not iterable
+            async for result in self._process_ranking_request(event, mode, date, count):
                 yield result
 
         except Exception as e:
@@ -512,7 +633,7 @@ class Pid2PdfPlugin(Star):
                 
                 for illust in result.illusts[:count * 2]:  # 获取更多以便过滤
                     # AI作品过滤
-                    is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                    is_ai = _is_ai_illust(illust)
                     
                     if ai_filter_mode == "过滤 AI 作品" and is_ai:
                         continue
@@ -552,7 +673,7 @@ class Pid2PdfPlugin(Star):
         try:
             pdf_img_paths = []
             combined_infos = ["作品信息：\n"]
-            is_r18 = mode in ["day_r18", "week_r18", "day_r18_ai"]
+            is_r18 = mode in R18_RANKING_MODES
             for i, artwork in enumerate(ranking_data, 1):
                 pid = str(artwork["id"])
                 title = artwork["title"]
@@ -581,9 +702,10 @@ class Pid2PdfPlugin(Star):
                 try:
                     # 检查本地是否已有图片
                     img_dir = self.temp_dir / f"{pid}"
-                    if img_dir.exists() and any(img_dir.iterdir()):
-                        # 发送已有的图片
-                        first_img = next(img_dir.iterdir())
+                    existing_imgs = _sorted_images(img_dir)
+                    if existing_imgs:
+                        # 发送已有的第一页（排序过，image_0 才是第一页）
+                        first_img = existing_imgs[0]
                         if is_r18:
                             pdf_img_paths.append(str(first_img.absolute()))
                         else:
@@ -682,38 +804,43 @@ class Pid2PdfPlugin(Star):
                 return None
             
             # 获取画师信息
-            error_info = ''
+            error_info = None
+            # 必须先初始化：三次都失败时 user_detail 不能处于未绑定状态，
+            # 否则下面的 `if not user_detail` 会抛 UnboundLocalError
+            user_detail = None
             for i in range(3):
                 try:
                     user_detail = self.papi.user_detail(uid)
                 except Exception as e:
                     logger.error(f"获取画师信息失败: {e}")
                     error_info = e
+                    user_detail = None
                 if user_detail and user_detail.user:
                     break
-                else:
-                    logger.info("尝试重新登录Pixiv")
-                    self.papi.auth(refresh_token=self.refresh_token)
-                    await asyncio.sleep(1)
-            if not user_detail:
-                logger.error(f"获取画师信息失败，错误信息：{error_info}")
-            if not user_detail.user:
-                logger.error(f"未找到画师 {uid}")
+                logger.info("尝试重新登录Pixiv")
+                self.papi.auth(refresh_token=self.refresh_token)
+                await asyncio.sleep(1)
+            if not user_detail or not user_detail.user:
+                logger.error(f"未找到画师 {uid}，错误信息：{error_info}")
                 return None
             
             artist_name = user_detail.user.name
             # logger.info(f"找到画师: {artist_name} (UID: {uid})")
             
             # 获取画师的插画作品
+            result = None
             for i in range(3):
-                result = self.papi.user_illusts(uid)
-                if result.illusts is not None:
+                try:
+                    result = self.papi.user_illusts(uid)
+                except Exception as e:
+                    logger.error(f"获取画师作品列表失败: {e}")
+                    result = None
+                if result and result.illusts is not None:
                     break
-                else:
-                    logger.info("尝试重新登录Pixiv")
-                    self.papi.auth(refresh_token=self.refresh_token)
-                    await asyncio.sleep(1)
-            if not result.illusts:
+                logger.info("尝试重新登录Pixiv")
+                self.papi.auth(refresh_token=self.refresh_token)
+                await asyncio.sleep(1)
+            if not result or not result.illusts:
                 logger.error(f"画师 {uid} 没有作品")
                 return None
             
@@ -731,7 +858,7 @@ class Pid2PdfPlugin(Star):
                     continue
                 
                 # AI作品过滤
-                is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                is_ai = _is_ai_illust(illust)
                 if ai_filter_mode == "过滤 AI 作品" and is_ai:
                     continue
                 elif ai_filter_mode == "仅 AI 作品" and not is_ai:
@@ -775,31 +902,41 @@ class Pid2PdfPlugin(Star):
                 return None
             
             # 获取画师信息
+            error_info = None
+            user_detail = None
             for i in range(3):
-                user_detail = self.papi.user_detail(uid)
-                if user_detail.user:
+                try:
+                    user_detail = self.papi.user_detail(uid)
+                except Exception as e:
+                    logger.error(f"获取画师信息失败: {e}")
+                    error_info = e
+                    user_detail = None
+                if user_detail and user_detail.user:
                     break
-                else:
-                    logger.info("尝试重新登录Pixiv")
-                    self.papi.auth(refresh_token=self.refresh_token)
-                    await asyncio.sleep(1)
-            if not user_detail.user:
-                logger.error(f"未找到画师 {uid}")
+                logger.info("尝试重新登录Pixiv")
+                self.papi.auth(refresh_token=self.refresh_token)
+                await asyncio.sleep(1)
+            if not user_detail or not user_detail.user:
+                logger.error(f"未找到画师 {uid}，错误信息：{error_info}")
                 return None
             
             artist_name = user_detail.user.name
             # logger.info(f"找到画师: {artist_name} (UID: {uid})")
             
             # 获取画师的插画作品
+            result = None
             for i in range(3):
-                result = self.papi.user_illusts(uid, "manga")
-                if result.illusts is not None:
+                try:
+                    result = self.papi.user_illusts(uid, "manga")
+                except Exception as e:
+                    logger.error(f"获取画师漫画列表失败: {e}")
+                    result = None
+                if result and result.illusts is not None:
                     break
-                # else:
-                #     logger.info("尝试重新登录Pixiv")
-                #     self.papi.auth(refresh_token=self.refresh_token)
-                #     await asyncio.sleep(1)
-            if not result.illusts:
+                logger.info("尝试重新登录Pixiv")
+                self.papi.auth(refresh_token=self.refresh_token)
+                await asyncio.sleep(1)
+            if not result or not result.illusts:
                 logger.error(f"画师 {uid} 没有作品")
                 return None
             
@@ -817,7 +954,7 @@ class Pid2PdfPlugin(Star):
                     continue
                 
                 # AI作品过滤
-                is_ai = hasattr(illust, 'illust_ai_type') and illust.illust_ai_type == 2
+                is_ai = _is_ai_illust(illust)
                 if ai_filter_mode == "过滤 AI 作品" and is_ai:
                     continue
                 elif ai_filter_mode == "仅 AI 作品" and not is_ai:
@@ -877,9 +1014,10 @@ class Pid2PdfPlugin(Star):
                 try:
                     # 检查本地是否已有图片
                     img_dir = self.temp_dir / f"{pid}"
-                    if img_dir.exists() and any(img_dir.iterdir()):
-                        # 发送已有的图片
-                        first_img = next(img_dir.iterdir())
+                    existing_imgs = _sorted_images(img_dir)
+                    if existing_imgs:
+                        # 发送已有的第一页（排序过，image_0 才是第一页）
+                        first_img = existing_imgs[0]
                         yield event.chain_result([Image.fromFileSystem(str(first_img.absolute()))])
                     else:
                         # 下载第一张图片
@@ -921,7 +1059,7 @@ class Pid2PdfPlugin(Star):
         
         # 添加订阅
         await self.sub_center.add_subscription(uid, group_id)
-        yield event.plain_result(f"成功订阅画师 UID: {uid} 的最新作品，使用命令 ""刷新订阅"" 可立即获取最新作品")
+        yield event.plain_result(f"成功订阅画师 UID: {uid} 的最新作品，使用命令「刷新订阅」可立即获取最新作品")
 
     @filter.command("删除订阅")
     async def remove_sub(self, event: AstrMessageEvent):
@@ -958,7 +1096,11 @@ class Pid2PdfPlugin(Star):
     async def _handle_sub_update(self, sub_data_list: list[SubscriptionData]):
         logger.info("开始更新订阅")
         try:
+            update_count = 0
             for sub_data in sub_data_list:
+                if update_count >= self.max_update_limit:
+                    logger.info(f"本次更新已达到最大限制 {self.max_update_limit}，跳过剩余画师")
+                    break
                 user_id = sub_data["user_id"]
                 sub_groups = sub_data["sub_groups"]
                 last_updated_id = sub_data["last_updated_id"]
@@ -1000,6 +1142,8 @@ class Pid2PdfPlugin(Star):
                     if len(new_works) == 0:
                         # logger.info(f"画师 {artist_name} (UID: {user_id}) 没有符合过滤条件的 {content_type} 新作品")
                         continue
+                    else:
+                        update_count += 1
                     for group_id in sub_groups:
                         await self.context.send_message(group_id, MessageChain().message(f"画师: {artist_name} (UID: {user_id})\n有 {len(new_works)} 个{content_type}新作品"))
                     for artwork_info in new_works:
@@ -1061,11 +1205,16 @@ class Pid2PdfPlugin(Star):
             async for result in self._process_ranking_request(event, mode = "day_ai", date = None, count = 10):
                 yield result
         #彩蛋 随机排行榜 超过一天后可再次触发，几率10%
-        elif self.easter_egg and int(datetime.now().timestamp()) - self.egg_trigger_time > 86400 and random.random() < 0.1:
+        elif (
+            self.easter_egg
+            and self.easter_egg_list  # 空列表会让 random.choice 抛异常
+            and int(datetime.now().timestamp()) - self.egg_trigger_time > 86400
+            and random.random() < 0.1
+        ):
             self.egg_trigger_time = int(datetime.now().timestamp())
             async with aiofiles.open(str(self.egg_trigger_record_file), "w") as f:
                 await f.write(str(self.egg_trigger_time))
-            rank_name = self.easter_egg_list[random.randint(0, len(self.easter_egg_list)-1)]
+            rank_name = random.choice(self.easter_egg_list)
             yield event.plain_result(f"你触发了今天的彩蛋！即将发送：{rank_name}")
             if rank_name == "今日色图":
                 async for result in self._process_ranking_request(event, mode = "day_r18", date = None, count = 10):
@@ -1085,7 +1234,10 @@ class Pid2PdfPlugin(Star):
     @filter.command("pid_help")
     async def help_command(self, event: AstrMessageEvent):
         """显示插件帮助信息"""
-        help_text = """
+        mode_lines = "\n".join(
+            f"- {mode}: {label}" for mode, label in RANKING_MODE_LABELS.items()
+        )
+        help_text = f"""
 Pid2Pdf 插件使用说明：
 
 命令格式：
@@ -1093,18 +1245,16 @@ Pid2Pdf 插件使用说明：
 /pid <Pixiv_ID> - 根据Pixiv ID下载图片并发送
 /pixiv_ranking [类型] [数量] - 获取Pixiv排行榜作品
 /puid <UID> [数量] - 根据画师UID下载最新作品
+/订阅画师 <UID> - 订阅画师的最新作品
+/删除订阅 <UID> - 取消订阅
+/刷新订阅 - 立即刷新一次订阅
+/pid_config - 查看当前配置状态
 
 排行榜类型：
-- day: 日榜（默认）
-- week: 周榜
-- month: 月榜
-- day_male: 男性向日榜
-- week_original: 原创周榜
-- day_manga: 漫画日榜
-- day_r18: R18日榜
-- week_r18: R18周榜
-- day_ai: AI作品榜
-- day_r18_ai: AI作品榜
+{mode_lines}
+
+简易命令（群里直接发这几个词即可）：
+今日色图 / 今日ai色图 / 今日排行榜 / 今日ai图
 
 示例：
 /pid2pdf 123456789
@@ -1126,9 +1276,12 @@ Pid2Pdf 插件配置状态：
 
 Pixiv API状态: {'已登录' if self.papi and self.refresh_token else '未配置'}
 代理设置: {self.proxy if self.proxy else '未设置'}
+订阅功能: {'已启用' if self.enable_subscription else '未启用'}
+R18 过滤: {self.config.get('r18_mode', '过滤 R18')}
+AI 作品过滤: {self.config.get('ai_filter_mode', '显示 AI 作品')}
 
 如需配置，请在插件配置文件中设置：
-- pixiv_refresh_token: 您的Pixiv refresh_token
+- refresh_token: 您的Pixiv refresh_token
 - proxy: 代理服务器地址（可选）
         """
         yield event.plain_result(config_info.strip())
@@ -1136,11 +1289,13 @@ Pixiv API状态: {'已登录' if self.papi and self.refresh_token else '未配�
     async def terminate(self):
         """插件销毁方法"""
         await self._cleanup_temp_files()
-        await self.sub_center.cleanup()
+        # initialize() 可能中途失败导致 sub_center 未创建，这里不能无条件访问
+        if self.sub_center is not None:
+            await self.sub_center.cleanup()
         logger.info("Pid2Pdf插件已销毁")
 
-async def _image_obfus(img_data):
-    """破坏图片哈希"""
+def _image_obfus(img_data):
+    """破坏图片哈希（同步 CPU 操作，调用方需用 asyncio.to_thread 包一层）"""
     from PIL import Image as ImageP
     from io import BytesIO
     import random

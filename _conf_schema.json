@@ -53,7 +53,7 @@
       "description": "随机彩蛋开关",
       "type": "bool",
       "hint": "收到消息时随机触发今日排行榜",
-      "default": "false"
+      "default": false
   },
     "enable_subscription": {
     "description": "启用订阅",
@@ -65,7 +65,13 @@
       "description": "订阅刷新间隔",
       "type": "int",
       "hint": "单位分钟",
-      "default": "90"
+      "default": 90
+  },
+  "max_update_limit": {
+      "description": "单次更新最大数量（按作者计）",
+      "type": "int",
+      "hint": "限制单次更新时最多更新多少个作者的作品，防止消息过多",
+      "default": 10
   },
   "easter_egg_list": {
       "description": "随机彩蛋范围",

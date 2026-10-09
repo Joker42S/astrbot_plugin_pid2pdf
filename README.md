@@ -92,7 +92,11 @@ git clone https://github.com/Joker42S/astrbot_plugin_pid2pdf.git
 - `week_rookie` - 新人周榜
 - `day_manga` - 漫画日榜
 - `day_r18` - R18日榜
+- `day_male_r18` - R18男性向日榜
+- `day_female_r18` - R18女性向日榜
 - `week_r18` - R18周榜
+- `week_r18g` - R18G周榜
+- `day_ai` - AI作品日榜
 - `day_r18_ai` - R18 AI日榜
 - `week_r18_ai` - R18 AI周榜
 

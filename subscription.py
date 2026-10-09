@@ -38,6 +38,16 @@ class SubscriptionCenter:
         """
         self.storage_file = Path(storage_file)
         self.max_update_count = max_update_count
+        # 兜底：refresh_interval 必须是正整数秒，否则 asyncio.sleep 会抛
+        # TypeError（历史配置里它可能是字符串 "90"）或变成忙等。
+        try:
+            refresh_interval = int(refresh_interval)
+        except (TypeError, ValueError):
+            logger.warning(f"刷新间隔 {refresh_interval!r} 非法，回退为 5 小时")
+            refresh_interval = 3600 * 5
+        if refresh_interval < 1:
+            logger.warning(f"刷新间隔 {refresh_interval} 过小，回退为 5 小时")
+            refresh_interval = 3600 * 5
         self.refresh_interval = refresh_interval
         self.subscriptions: List[SubscriptionData] = []
         self.callback: Optional[Callable[[List[SubscriptionData]], Any]] = None
@@ -89,11 +99,11 @@ class SubscriptionCenter:
         except Exception as e:
             logger.error(f"保存订阅数据失败: {e}")
 
-    async def add_subscription(self, sub_id: int, group_id: str) -> bool:
+    async def add_subscription(self, sub_id: str, group_id: str) -> bool:
         """
         增加订阅
         Args:
-            sub_id: 订阅对象ID
+            sub_id: 订阅对象ID（画师 UID，字符串）
             group_id: 订阅群组
 
         Returns:
@@ -111,7 +121,7 @@ class SubscriptionCenter:
                 if is_new_sub:
                     self.subscriptions.append(
                         SubscriptionData(
-                            user_id=sub_id, last_updated_id=0, last_updated_time=0, sub_groups=[group_id]
+                            user_id=sub_id, last_updated_id="0", last_updated_time=0, sub_groups=[group_id]
                         )
                     )
                 logger.info(f"成功添加订阅对象: {sub_id}，群组：{group_id}")
@@ -121,7 +131,7 @@ class SubscriptionCenter:
             logger.error(f"添加订阅失败: {e}")
             return False
 
-    async def remove_subscription(self, sub_id: int, group_id: str) -> bool:
+    async def remove_subscription(self, sub_id: str, group_id: str) -> bool:
         """
         删除订阅
 
@@ -265,7 +275,7 @@ class SubscriptionCenter:
             logger.error(f"手动刷新失败: {e}")
             return False
 
-    async def renew_last_updated_id(self, sub_id: int, new_last_id: int) -> bool:
+    async def renew_last_updated_id(self, sub_id: str, new_last_id: int) -> bool:
         """
         更新订阅对象的最后更新作品ID
 
